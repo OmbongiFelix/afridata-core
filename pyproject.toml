@@ -1,0 +1,11 @@
+[project]
+name = "afridata-core"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "django>=6.0.3",
+    "djangorestframework>=3.16.1",
+    "scikit-learn>=1.8.0",
+]
