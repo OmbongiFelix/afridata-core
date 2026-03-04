@@ -1,0 +1,228 @@
+# ============================================================
+#  .gitignore — Metadata Extraction & Recommendation Engine
+# ============================================================
+
+
+# ── Python ───────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+
+# Distribution / packaging
+build/
+dist/
+eggs/
+*.egg
+*.egg-info/
+.eggs/
+wheels/
+sdist/
+develop-eggs/
+lib/
+lib64/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+.env
+.env.*
+!.env.example
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+
+# ── Django / Framework ───────────────────────────────────────
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+mediafiles/
+
+
+# ── Database & Migrations ────────────────────────────────────
+*.sql
+*.dump
+*.db
+# Keep migration files but ignore auto-generated conflict markers
+*.orig
+
+
+# ── ML Models & Training Artefacts ───────────────────────────
+# Serialised models
+*.pkl
+*.pickle
+*.joblib
+*.h5
+*.hdf5
+*.pt
+*.pth
+*.onnx
+*.pb
+*.tflite
+*.bin
+*.safetensors
+
+# Training checkpoints & logs
+checkpoints/
+runs/
+lightning_logs/
+mlruns/
+wandb/
+.neptune/
+outputs/
+artifacts/
+
+# Large dataset files
+*.csv
+*.tsv
+*.parquet
+*.feather
+*.arrow
+*.npy
+*.npz
+*.jsonl
+
+
+# ── Recommendation Engine ─────────────────────────────────────
+# Pre-computed scores and embeddings
+embeddings/
+vectors/
+indices/
+*.faiss
+*.annoy
+*.index
+
+# Cached recommendation snapshots
+recommendation_cache/
+precomputed/
+batch_outputs/
+
+# Evaluation results
+eval_results/
+metrics/
+reports/*.html
+reports/*.pdf
+
+
+# ── Metadata Extraction Pipeline ─────────────────────────────
+# Raw ingested content
+raw_content/
+ingested/
+downloads/
+scraped/
+tmp_uploads/
+
+# Intermediate extraction outputs
+extracted/
+enhanced/
+staging/
+
+# Processed NLP / NER artefacts
+*.spacy
+*.vocab
+nlp_cache/
+
+# Visual extraction intermediates
+frames/
+thumbnails/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.mp4
+*.avi
+*.mov
+
+
+# ── Cloud & Infrastructure ────────────────────────────────────
+# AWS
+.aws/
+*.pem
+*.p12
+*.pfx
+
+# Terraform / IaC
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!example.tfvars
+
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+
+# ── Celery ────────────────────────────────────────────────────
+celerybeat-schedule
+celerybeat.pid
+*.pid
+
+
+# ── Caching (Redis / Memcached) ───────────────────────────────
+.cache/
+cache/
+*.rdb
+dump.rdb
+
+
+# ── Testing & Coverage ───────────────────────────────────────
+.tox/
+.nox/
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+nosetests.xml
+test-results/
+*.test.db
+
+
+# ── Type Checking & Linting ───────────────────────────────────
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.pytype/
+
+
+# ── Jupyter Notebooks ─────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+
+# ── Secrets & Credentials ─────────────────────────────────────
+secrets/
+credentials/
+*.key
+*.secret
+*_secret*
+*_credentials*
+service_account*.json
+config/local*.py
+config/production*.py
+
+
+# ── IDE & Editor ─────────────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+
+# ── Docs Build Output ─────────────────────────────────────────
+docs/_build/
+docs/site/
+site/
