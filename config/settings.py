@@ -10,22 +10,28 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+import os
 from pathlib import Path
+from dotenv import load_dotenv
+
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+#load .env
+load_dotenv(BASE_DIR / ".env")
+
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.0/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-=pictpk7-jrh%*88+hir&p&(!tmn^uvm(_o66%31u$)79&zu9g'
+SECRET_KEY = os.getenv("SECRET_KEY")
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.getenv("DEBUG", "False").lower() in ("true", "1", "yes")
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = os.getenv("ALLOWED_HOSTS", "").split(",") if os.getenv("ALLOWED_HOSTS") else []
 
 
 # Application definition
@@ -122,3 +128,20 @@ USE_TZ = True
 # https://docs.djangoproject.com/en/6.0/howto/static-files/
 
 STATIC_URL = 'static/'
+
+
+
+
+LLM_BACKEND = "openai" # ⚠ required — selects the backend
+LLM_MODEL = "gpt-4o-mini" # or "gpt-4o", "gpt-3.5-turbo"
+
+# Get your key → https://platform.openai.com/api-keys
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
+# Optional tuning 
+LLM_BATCH_SIZE = 10 # columns per LLM request (default: 10)
+LLM_MAX_TOKENS = 1024 # max tokens in reply (default: 1024)
+LLM_TEMPERATURE = 0.2 # lower = more deterministic (default: 0.2)
+LLM_REQUEST_TIMEOUT = 30 # seconds per HTTP request (default: 30)
+LLM_MAX_RETRIES = 3 # retry attempts on failure (default: 3)
+LLM_RETRY_BACKOFF = 2.0 # exponential backoff base (default: 2.0)
