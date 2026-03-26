@@ -93,6 +93,20 @@ DATABASES = {
 }
 
 
+CACHES = {
+    "default": {
+        'BACKEND': "django.core.cache.backends.redis.RedisCache",
+        'LOCATION': "redis://127.0.0.1:6379",  #this ip address is only an example
+        'Timeout': 60 * 60,  # <1hr> this is also a placeholder not yet decided upon
+        # max entries and eviction policy can be set here if desired, but defaults are usually fine for LLM caching
+        # is there an option to set ttl per cache entry? that would be ideal for LLM caching, but if not we can just set a global timeout as above
+        'OPTIONS': {
+            
+        }, 
+    }
+}
+
+
 # Password validation
 # https://docs.djangoproject.com/en/6.0/ref/settings/#auth-password-validators
 
