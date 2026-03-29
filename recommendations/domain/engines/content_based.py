@@ -26,7 +26,9 @@ import numpy as np
 import scipy.sparse
 from sklearn.preprocessing import normalize
 
+from infrastructure.persistence import get_user_interactions
 from infrastructure.vector_store import VectorStoreError, load_tfidf_matrix
+from recommendations.domain.schemas import CandidateSet
 
 if TYPE_CHECKING:
     pass
@@ -109,7 +111,7 @@ def _build_user_profile(
                 item_id,
             )
             continue
-        item_vec = tfidf_matrix[row_idx]          # shape (1, n_features)
+        item_vec = tfidf_matrix[row_idx]  # shape (1, n_features)
         weighted_vec = item_vec * weight
         weighted_sum = weighted_vec if weighted_sum is None else weighted_sum + weighted_vec
         total_weight += weight
@@ -120,7 +122,7 @@ def _build_user_profile(
         )
         return None
 
-    profile = weighted_sum / total_weight         # normalise by total weight
+    profile = weighted_sum / total_weight  # normalise by total weight
     return profile
 
 
@@ -134,6 +136,11 @@ def _cosine_scores(
     Both inputs are L2-normalised before the dot product so the result
     is in [-1, 1] (practically [0, 1] for non-negative TF-IDF features).
 
+    Uses sparse matrix operations throughout to avoid memory overflow on
+    large matrices (10k+ items × 10k features). This is intentionally
+    preferred over ``sklearn.metrics.pairwise.cosine_similarity``, which
+    materialises a dense intermediate matrix.
+
     Parameters
     ----------
     tfidf_matrix:
@@ -146,7 +153,7 @@ def _cosine_scores(
     np.ndarray
         Dense 1-D array of shape ``(n_items,)`` with cosine similarities.
     """
-    # L2-normalise rows in-place on copies (preserve originals).
+    # L2-normalise rows on copies (preserve originals).
     normed_matrix = normalize(tfidf_matrix, norm="l2", copy=True)
     normed_profile = normalize(profile_vector, norm="l2", copy=True)
 
@@ -167,6 +174,11 @@ class ContentBasedEngine:
     Load once per process (e.g. in AppConfig.ready) and reuse across
     requests; the TF-IDF matrix is held in memory.
 
+    The primary public entry-point is ``score()``, which resolves a user's
+    interaction history automatically via ``get_user_interactions``.
+    For callers that already hold interaction data (e.g. batch jobs),
+    ``score_for_user()`` accepts pre-fetched lists directly.
+
     Parameters
     ----------
     matrix_path:
@@ -177,6 +189,11 @@ class ContentBasedEngine:
     --------
     >>> engine = ContentBasedEngine()
     >>> engine.load()
+
+    # High-level: resolve interactions automatically
+    >>> scores = engine.score(user_id=42, candidates=[101, 202, 303, 404])
+
+    # Low-level: supply interactions directly
     >>> scores = engine.score_for_user(
     ...     interacted_item_ids=[101, 202],
     ...     interaction_weights=[3.0, 1.0],
@@ -236,7 +253,112 @@ class ContentBasedEngine:
             )
 
     # ------------------------------------------------------------------
-    # Scoring
+    # Profile construction (public)
+    # ------------------------------------------------------------------
+
+    def build_user_profile(
+        self,
+        interactions: list[dict],
+    ) -> scipy.sparse.csr_matrix | None:
+        """
+        Build and return a sparse TF-IDF profile vector for a user.
+
+        Delegates to the module-level ``_build_user_profile`` helper after
+        unpacking the interaction dicts.  Exposed publicly so callers can
+        inspect or cache the profile independently of scoring.
+
+        Parameters
+        ----------
+        interactions:
+            List of dicts, each with keys:
+              - ``item_id``  (int)   — dataset ID
+              - ``weight``   (float) — interaction weight
+                (use ``WEIGHT_DOWNLOAD``, ``WEIGHT_VIEW``, or ``WEIGHT_IMPLICIT``)
+
+        Returns
+        -------
+        scipy.sparse.csr_matrix or None
+            Sparse row vector of shape ``(1, n_features)``, or ``None`` for
+            a cold-start user whose items are all absent from the matrix.
+
+        Raises
+        ------
+        ContentEngineError
+            If the engine has not been loaded.
+        """
+        self._require_loaded()
+        assert self._tfidf_matrix is not None
+        assert self._item_ids is not None
+
+        item_ids = [int(i["item_id"]) for i in interactions]
+        weights = [float(i["weight"]) for i in interactions]
+
+        return _build_user_profile(
+            tfidf_matrix=self._tfidf_matrix,
+            item_ids=self._item_ids,
+            interacted_item_ids=item_ids,
+            interaction_weights=weights,
+        )
+
+    # ------------------------------------------------------------------
+    # Scoring — high-level (spec entry-point)
+    # ------------------------------------------------------------------
+
+    def score(
+        self,
+        user_id: int,
+        candidates: CandidateSet,
+        item_popularities: dict[int, float] | None = None,
+        exclude_interacted: bool = True,
+    ) -> dict[int, float]:
+        """
+        Score candidate items for a user, resolving their interaction history
+        automatically via ``get_user_interactions``.
+
+        This is the primary public entry-point for online inference.
+        For batch jobs that already hold interaction data, prefer
+        ``score_for_user()`` to avoid redundant DB round-trips.
+
+        Parameters
+        ----------
+        user_id:
+            The user to score for.
+        candidates:
+            ``CandidateSet`` — a list of dataset IDs to rank.
+        item_popularities:
+            Mapping of dataset_id → raw popularity count used for
+            cold-start fallback.  If ``None``, cold-start users receive
+            uniform 0.0 scores.
+        exclude_interacted:
+            If ``True`` (default), already-interacted items receive a score
+            of 0.0 so they are effectively excluded from recommendations.
+
+        Returns
+        -------
+        dict[int, float]
+            Mapping of ``dataset_id → S_CBF score`` in ``[0.0, 1.0]``.
+
+        Raises
+        ------
+        ContentEngineError
+            If the engine has not been loaded.
+        """
+        self._require_loaded()
+
+        raw_interactions = get_user_interactions(user_id)
+        interacted_item_ids: list[int] = [i["item_id"] for i in raw_interactions]
+        interaction_weights: list[float] = [i["weight"] for i in raw_interactions]
+
+        return self.score_for_user(
+            interacted_item_ids=interacted_item_ids,
+            interaction_weights=interaction_weights,
+            candidate_item_ids=list(candidates),
+            item_popularities=item_popularities or {},
+            exclude_interacted=exclude_interacted,
+        )
+
+    # ------------------------------------------------------------------
+    # Scoring — low-level (pre-fetched interactions)
     # ------------------------------------------------------------------
 
     def score_for_user(
@@ -288,7 +410,7 @@ class ContentBasedEngine:
         """
         self._require_loaded()
 
-        assert self._tfidf_matrix is not None   # appease type checkers
+        assert self._tfidf_matrix is not None  # appease type checkers
         assert self._item_ids is not None
 
         interacted_set = set(interacted_item_ids) if exclude_interacted else set()
@@ -345,7 +467,9 @@ class ContentBasedEngine:
         Score candidates for multiple users in a single pass.
 
         Avoids reloading the matrix between users.  Useful for offline
-        batch inference jobs.
+        batch inference jobs where interaction data is already available
+        (e.g. from a pre-fetched queryset).  For online single-user scoring
+        with automatic interaction resolution, use ``score()`` instead.
 
         Parameters
         ----------
@@ -410,7 +534,11 @@ class ContentBasedEngine:
             Normalised scores in ``[0.0, 1.0]``.
         """
         raw_scores: dict[int, float] = {
-            item_id: (0.0 if item_id in exclude_set else float(item_popularities.get(item_id, 0.0)))
+            item_id: (
+                0.0
+                if item_id in exclude_set
+                else float(item_popularities.get(item_id, 0.0))
+            )
             for item_id in candidate_item_ids
         }
 
