@@ -17,11 +17,13 @@ Responsibilities:
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional
 
-from infrastructure.persistence import get_all_dataset_ids, get_user_interactions
+from recommendations.domain.schemas import CandidateSet, EngineConfig
+from recommendations.infrastructure.persistence import (
+    get_all_dataset_ids,
+    get_user_interactions,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +31,7 @@ logger = logging.getLogger(__name__)
 # Defaults / constants
 # ---------------------------------------------------------------------------
 
-# Maximum candidate pool size returned when no explicit cap is given.
+# Fallback pool cap when EngineConfig.candidate_pool_size is not set.
 # Prevents the scoring engines from receiving an unbounded item list on
 # large catalogues.
 DEFAULT_MAX_POOL_SIZE: int = 5_000
@@ -46,45 +48,6 @@ DEFAULT_MIN_POPULARITY: int = 1
 
 class CandidateGenerationError(RuntimeError):
     """Raised for unrecoverable errors during candidate generation."""
-
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class CandidateSet:
-    """
-    Output schema for the candidate generation step.
-
-    Attributes
-    ----------
-    user_id:
-        The user for whom candidates were generated.
-    candidate_ids:
-        Ordered list of dataset IDs eligible for scoring.
-        Items the user has already seen are excluded.
-    seen_ids:
-        Set of dataset IDs the user has previously interacted with
-        (used downstream to enforce exclusion at scoring time).
-    is_cold_start:
-        True if the user has no recorded interactions.
-    total_pool_size:
-        Size of the full active-dataset pool before filtering.
-    generated_at:
-        UTC timestamp of candidate generation.
-    """
-
-    user_id: int
-    candidate_ids: list[int]
-    seen_ids: set[int]
-    is_cold_start: bool
-    total_pool_size: int
-    generated_at: datetime = field(default_factory=datetime.utcnow)
-
-    def __len__(self) -> int:
-        return len(self.candidate_ids)
 
 
 # ---------------------------------------------------------------------------
@@ -183,32 +146,27 @@ class CandidateGenerator:
 
     Intended to run at the start of every recommendation request, before
     the collaborative and content-based engines score individual items.
+    This stage owns the seen-item filter — no downstream engine should
+    duplicate that logic.
 
     Parameters
     ----------
-    max_pool_size:
-        Hard cap on the number of candidates returned.  When the unseen
-        pool exceeds this value the most popular items are kept.
-        Defaults to ``DEFAULT_MAX_POOL_SIZE``.
     min_popularity:
         Datasets with fewer than this many interactions are removed from
-        the candidate pool when ``apply_popularity_filter=True``.
-        Defaults to ``DEFAULT_MIN_POPULARITY``.
+        the candidate pool when ``config.apply_popularity_filter`` is
+        ``True``.  Defaults to ``DEFAULT_MIN_POPULARITY``.
 
     Examples
     --------
-    >>> generator = CandidateGenerator(max_pool_size=1000)
-    >>> candidate_set = generator.generate(user_id=42)
+    >>> from recommendations.domain.schemas import EngineConfig
+    >>> generator = CandidateGenerator()
+    >>> config = EngineConfig(candidate_pool_size=1000)
+    >>> candidate_set = generator.generate(user_id=42, config=config)
     >>> len(candidate_set)
     987
     """
 
-    def __init__(
-        self,
-        max_pool_size: int = DEFAULT_MAX_POOL_SIZE,
-        min_popularity: int = DEFAULT_MIN_POPULARITY,
-    ) -> None:
-        self._max_pool_size = max_pool_size
+    def __init__(self, min_popularity: int = DEFAULT_MIN_POPULARITY) -> None:
         self._min_popularity = min_popularity
 
     # ------------------------------------------------------------------
@@ -218,10 +176,9 @@ class CandidateGenerator:
     def generate(
         self,
         user_id: int,
+        config: EngineConfig,
         item_popularities: Optional[dict[int, int]] = None,
         item_recency_scores: Optional[dict[int, float]] = None,
-        apply_popularity_filter: bool = False,
-        apply_recency_filter: bool = False,
     ) -> CandidateSet:
         """
         Build a ``CandidateSet`` for *user_id*.
@@ -231,36 +188,42 @@ class CandidateGenerator:
         1. Fetch all active dataset IDs from persistence.
         2. Fetch the user's interaction history from persistence.
         3. Subtract seen items from the full pool.
-        4. Optionally apply popularity and/or recency pre-filters.
-        5. Cap the pool at ``max_pool_size`` (most popular items kept).
-        6. Return a ``CandidateSet``.
+        4. Optionally apply popularity and/or recency pre-filters
+           (controlled by ``config``).
+        5. Cap the pool at ``config.candidate_pool_size`` (most popular
+           items kept; falls back to ``DEFAULT_MAX_POOL_SIZE``).
+        6. Return a ``CandidateSet`` — always a valid object, never an
+           error, even when all items have been seen (returns empty list).
 
         Parameters
         ----------
         user_id:
             Primary key of the requesting user.
+        config:
+            Engine configuration object.  The relevant fields are:
+            ``candidate_pool_size`` — hard cap on pool size (``None``
+            falls back to ``DEFAULT_MAX_POOL_SIZE``);
+            ``apply_popularity_filter`` — if ``True`` and
+            ``item_popularities`` is supplied, remove low-popularity items;
+            ``apply_recency_filter`` — if ``True`` and
+            ``item_recency_scores`` is supplied, restrict to most-recent items.
         item_popularities:
             Mapping of dataset_id → interaction_count.  Required when
-            ``apply_popularity_filter=True`` or when the pool needs to
-            be capped by popularity.  If ``None`` an empty dict is used
-            (no popularity information available).
+            ``config.apply_popularity_filter`` is ``True`` or when the pool
+            needs to be capped by popularity.  If ``None`` an empty dict
+            is used (no popularity information available).
         item_recency_scores:
             Mapping of dataset_id → recency score (higher = more recent).
-            Required when ``apply_recency_filter=True``.  If ``None``
-            an empty dict is used.
-        apply_popularity_filter:
-            If ``True``, remove datasets below ``min_popularity`` from
-            the candidate pool before capping.
-        apply_recency_filter:
-            If ``True``, restrict the pool to the top-``max_pool_size``
-            most recent items (applied after the popularity filter and
-            before the hard size cap).
+            Required when ``config.apply_recency_filter`` is ``True``.
+            If ``None`` an empty dict is used.
 
         Returns
         -------
         CandidateSet
             Contains the filtered, capped list of candidate IDs together
-            with metadata useful to downstream engines.
+            with metadata useful to downstream engines.  When the user has
+            interacted with every active item, ``candidate_ids`` is an
+            empty list — this is not an error condition.
 
         Raises
         ------
@@ -269,6 +232,11 @@ class CandidateGenerator:
         """
         popularities: dict[int, int] = item_popularities or {}
         recency_scores: dict[int, float] = item_recency_scores or {}
+        max_pool_size: int = (
+            config.candidate_pool_size
+            if getattr(config, "candidate_pool_size", None)
+            else DEFAULT_MAX_POOL_SIZE
+        )
 
         # ---- step 1: full active pool -----------------------------------
         try:
@@ -304,6 +272,8 @@ class CandidateGenerator:
         )
 
         # ---- step 3: subtract seen items --------------------------------
+        # Returns an empty list (not an error) when the user has seen
+        # every active item — callers must handle len(candidate_set) == 0.
         candidates: list[int] = [
             item_id for item_id in all_ids if item_id not in seen_ids
         ]
@@ -315,7 +285,7 @@ class CandidateGenerator:
         )
 
         # ---- step 4a: optional popularity pre-filter --------------------
-        if apply_popularity_filter and popularities:
+        if getattr(config, "apply_popularity_filter", False) and popularities:
             candidates = _apply_popularity_filter(
                 candidate_ids=candidates,
                 item_popularities=popularities,
@@ -323,23 +293,23 @@ class CandidateGenerator:
             )
 
         # ---- step 4b: optional recency pre-filter -----------------------
-        if apply_recency_filter and recency_scores:
+        if getattr(config, "apply_recency_filter", False) and recency_scores:
             candidates = _apply_recency_filter(
                 candidate_ids=candidates,
                 item_recency_scores=recency_scores,
-                top_n=self._max_pool_size,
+                top_n=max_pool_size,
             )
 
         # ---- step 5: hard cap by popularity -----------------------------
-        if len(candidates) > self._max_pool_size:
+        if len(candidates) > max_pool_size:
             candidates = sorted(
                 candidates,
                 key=lambda item_id: popularities.get(item_id, 0),
                 reverse=True,
-            )[: self._max_pool_size]
+            )[:max_pool_size]
             logger.debug(
                 "candidate_generation.generate: pool capped at %d",
-                self._max_pool_size,
+                max_pool_size,
             )
 
         logger.info(
