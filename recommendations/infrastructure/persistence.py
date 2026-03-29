@@ -8,6 +8,7 @@ they call functions from here instead.
 Functions:
   get_user_interactions(user_id) -> list[UserInteraction]
   get_all_dataset_ids()          -> list[int]
+  get_all_datasets()             -> QuerySet[DatasetProxy]
   save_recommendation_result(user_id, ranked_list, alpha) -> RecommendationResult
   get_latest_recommendation(user_id) -> RecommendationResult | None
 """
@@ -38,6 +39,10 @@ def get_user_interactions(user_id: int) -> list[UserInteraction]:
     Return all UserInteraction records for the given user, ordered by
     most recent first.
 
+    ``select_related("user")`` is applied so that any FK traversal on
+    ``interaction.user`` in domain code does not trigger an extra query
+    per row.
+
     Parameters
     ----------
     user_id:
@@ -49,7 +54,9 @@ def get_user_interactions(user_id: int) -> list[UserInteraction]:
         May be empty if the user has no recorded interactions (cold-start).
     """
     return list(
-        UserInteraction.objects.filter(user_id=user_id).order_by("-created_at")
+        UserInteraction.objects.filter(user_id=user_id)
+        .select_related("user")
+        .order_by("-created_at")
     )
 
 
