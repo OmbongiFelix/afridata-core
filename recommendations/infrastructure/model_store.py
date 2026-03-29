@@ -23,6 +23,7 @@ from typing import Any
 
 import joblib
 from django.conf import settings
+from django.core.exceptions import ImproperlyConfigured  # top-level: always available
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,47 @@ class ModelNotFoundError(FileNotFoundError):
     Callers (collaborative.py) should catch this and surface a clear error
     rather than silently returning zero scores.
     """
+
+
+# ---------------------------------------------------------------------------
+# Safety guard — prevent accidental storage of raw interaction data
+# ---------------------------------------------------------------------------
+
+# Attribute names that suggest the object carries raw user/interaction data
+# rather than fitted model weights.  Checked in save_model() as a lightweight
+# safeguard; not an exhaustive validation.
+_RAW_DATA_ATTRS = frozenset(
+    {
+        "user_ids",
+        "item_ids",
+        "interaction_matrix",
+        "ratings_matrix",
+        "raw_interactions",
+    }
+)
+
+
+def _assert_no_raw_data(model: Any) -> None:
+    """
+    Raise ``ValueError`` if *model* looks like it contains raw interaction data
+    or user identifiers rather than fitted model weights.
+
+    This is a best-effort heuristic, not a deep inspection. Its purpose is to
+    catch obvious mistakes (e.g. accidentally passing a DataFrame of user events
+    instead of a fitted Pipeline).
+
+    Raises
+    ------
+    ValueError
+        If any of the sentinel attribute names are found on *model*.
+    """
+    found = _RAW_DATA_ATTRS.intersection(dir(model))
+    if found:
+        raise ValueError(
+            f"save_model() received an object that appears to contain raw "
+            f"interaction data or user IDs (suspicious attributes: {sorted(found)}). "
+            "Only pass fitted model weight objects — never raw interaction data."
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +149,7 @@ def _s3_bucket() -> str:
     """Return the S3 bucket name from settings, raising clearly if absent."""
     bucket = getattr(settings, "MODEL_STORE_S3_BUCKET", None)
     if not bucket:
-        raise ImproperlyConfigured(  # noqa: F821
+        raise ImproperlyConfigured(
             "settings.MODEL_STORE_S3_BUCKET must be set when "
             "MODEL_STORE_BACKEND = 's3'."
         )
@@ -175,17 +217,22 @@ def save_model(model: Any, path: str) -> None:
     ----------
     model:
         Any joblib-serialisable object — typically an sklearn Pipeline,
-        TruncatedSVD, or implicit ALS model.
+        TruncatedSVD, or implicit ALS model.  Raw interaction data or objects
+        carrying user IDs must never be passed here.
     path:
         Destination path (local filesystem path or S3 object key,
         depending on ``settings.MODEL_STORE_BACKEND``).
 
     Raises
     ------
+    ValueError
+        If *model* appears to contain raw interaction data or user identifiers.
     ImproperlyConfigured
         If ``MODEL_STORE_BACKEND = 's3'`` but ``MODEL_STORE_S3_BUCKET``
         is not set.
     """
+    _assert_no_raw_data(model)
+
     backend = _backend()
     logger.info("model_store.save_model: backend=%s path=%s", backend, path)
 
@@ -234,13 +281,3 @@ def load_model(path: str) -> Any:
             backend,
         )
     return _load_local(path)
-
-
-# ---------------------------------------------------------------------------
-# Lazy import guard for ImproperlyConfigured
-# ---------------------------------------------------------------------------
-# Placed after the public API so the module is importable even in environments
-# where Django settings are not fully configured (e.g. pure unit tests that
-# never call save_model / load_model with the s3 backend).
-
-from django.core.exceptions import ImproperlyConfigured  # noqa: E402
