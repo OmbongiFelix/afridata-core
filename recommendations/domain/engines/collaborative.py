@@ -18,15 +18,13 @@ Does not train. Training is handled by:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 import numpy as np
 from django.conf import settings
 
-from infrastructure.model_store import ModelNotFoundError, load_model
-
-if TYPE_CHECKING:
-    pass
+from recommendations.domain.schemas import CandidateSet
+from recommendations.infrastructure.model_store import ModelNotFoundError, load_model
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +49,17 @@ _CF_MODEL_TYPE_SETTING = "CF_MODEL_TYPE"
 
 
 class CollaborativeEngineError(RuntimeError):
-    """Raised for unrecoverable errors in the collaborative filtering engine."""
+    """Base class for unrecoverable errors in the collaborative filtering engine."""
+
+
+class ModelNotLoadedError(CollaborativeEngineError):
+    """
+    Raised when model weights cannot be located or the engine is used before
+    ``load()`` has been called successfully.
+
+    Wraps ``ModelNotFoundError`` from ``model_store`` as ``__cause__`` so
+    callers can inspect the underlying I/O error if needed.
+    """
 
 
 # ---------------------------------------------------------------------------
@@ -240,6 +248,9 @@ class CollaborativeEngine:
     --------
     >>> engine = CollaborativeEngine()
     >>> engine.load()
+    >>> # Primary interface — pass a CandidateSet from the retrieval stage:
+    >>> scores = engine.score(user_id=42, candidates=candidate_set)
+    >>> # Lower-level interface — pass raw lists directly:
     >>> scores = engine.score_for_user(
     ...     user_id=42,
     ...     candidate_item_ids=[101, 202, 303],
@@ -266,8 +277,8 @@ class CollaborativeEngine:
 
         Raises
         ------
-        CollaborativeEngineError
-            Wraps ``ModelNotFoundError`` if the weights cannot be found.
+        ModelNotLoadedError
+            Wraps ``ModelNotFoundError`` if the weights file cannot be found.
         """
         resolved_type = _model_type()
         logger.info(
@@ -279,7 +290,7 @@ class CollaborativeEngine:
         try:
             self._model = load_model(self._model_path)
         except ModelNotFoundError as exc:
-            raise CollaborativeEngineError(
+            raise ModelNotLoadedError(
                 f"Cannot load collaborative model from '{self._model_path}'. "
                 "Run train_collaborative to build the model first."
             ) from exc
@@ -296,13 +307,46 @@ class CollaborativeEngine:
 
     def _require_loaded(self) -> None:
         if not self.is_loaded:
-            raise CollaborativeEngineError(
+            raise ModelNotLoadedError(
                 "CollaborativeEngine has not been loaded. Call engine.load() first."
             )
 
     # ------------------------------------------------------------------
     # Scoring
     # ------------------------------------------------------------------
+
+    def score(self, user_id: int, candidates: CandidateSet) -> dict[int, float]:
+        """
+        Score a ``CandidateSet`` for a single user.  Primary public interface.
+
+        Delegates to ``score_for_user`` after unpacking the ``CandidateSet``
+        so callers in the orchestrating layer never deal with raw index dicts.
+
+        Parameters
+        ----------
+        user_id:
+            Internal integer user index (as used during training).
+        candidates:
+            ``CandidateSet`` produced by the retrieval stage.  Must expose
+            ``item_ids`` (list[int]) and ``item_id_to_index`` (dict[int, int]).
+
+        Returns
+        -------
+        dict[int, float]
+            Mapping of ``dataset_id → S_CF score`` in [0.0, 1.0].
+
+        Raises
+        ------
+        ModelNotLoadedError
+            If the engine has not been loaded or the weights file is missing.
+        CollaborativeEngineError
+            If the configured model type is unrecognised.
+        """
+        return self.score_for_user(
+            user_id=user_id,
+            candidate_item_ids=candidates.item_ids,
+            item_id_to_index=candidates.item_id_to_index,
+        )
 
     def score_for_user(
         self,
