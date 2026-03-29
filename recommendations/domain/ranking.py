@@ -17,7 +17,8 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
+from datetime import datetime, timezone
+from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
@@ -65,10 +66,54 @@ class ScoredCandidate:
         return f"ScoredCandidate(item_id={self.item_id}, score={self.score:.4f}{cat})"
 
 
-# RankedList is a plain ordered list of ScoredCandidates.
-# It is a type alias so callers can annotate return types clearly without
-# importing a concrete wrapper class.
-RankedList = list[ScoredCandidate]
+@dataclass
+class RankedList:
+    """
+    Ordered result set returned by ``rank()``.
+
+    Wraps the sorted candidates with pipeline metadata so that callers
+    can inspect when the ranking was produced without needing a separate
+    out-of-band timestamp.
+
+    Attributes
+    ----------
+    items:
+        Ordered list of ``ScoredCandidate`` objects, highest score first.
+        Ties are broken by ``item_id`` ascending for determinism.
+    generated_at:
+        UTC datetime at which this ``RankedList`` was assembled.
+        Populated automatically; callers should not set it directly.
+
+    Notes
+    -----
+    Iteration and ``len()`` delegate to ``items`` via ``__iter__`` and
+    ``__len__``, so existing code that treats a ``RankedList`` as a plain
+    list continues to work without modification.
+    """
+
+    items: List[ScoredCandidate] = field(default_factory=list)
+    generated_at: datetime = field(
+        default_factory=lambda: datetime.now(tz=timezone.utc)
+    )
+
+    # ------------------------------------------------------------------
+    # Convenience delegation — behave like a list where it matters
+    # ------------------------------------------------------------------
+
+    def __iter__(self):
+        return iter(self.items)
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index):
+        return self.items[index]
+
+    def __repr__(self) -> str:
+        return (
+            f"RankedList(n={len(self.items)}, "
+            f"generated_at={self.generated_at.isoformat()})"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -93,8 +138,9 @@ class RankingConfig:
         Defaults to 0.0.
     mmr_penalty:
         Score penalty multiplier applied to candidates whose category
-        matches a recently selected item.  Values in (0.0, 1.0) reduce
-        score; 0.0 would permanently suppress an item.
+        matches a recently selected item.  Values in (0.0, 1.0] reduce
+        score; 0.0 would permanently suppress an item and is therefore
+        disallowed.
         Only used when ``diversity_weight > 0``.
         Defaults to ``DEFAULT_MMR_PENALTY``.
     """
@@ -125,9 +171,10 @@ class RankingConfig:
 # ---------------------------------------------------------------------------
 
 
-def _sort_by_score(candidates: list[ScoredCandidate]) -> RankedList:
+def _sort_by_score(candidates: List[ScoredCandidate]) -> List[ScoredCandidate]:
     """
-    Return candidates sorted by score descending (pure relevance order).
+    Return candidates sorted by score descending, breaking ties by
+    ``item_id`` ascending for deterministic output.
 
     Parameters
     ----------
@@ -136,18 +183,18 @@ def _sort_by_score(candidates: list[ScoredCandidate]) -> RankedList:
 
     Returns
     -------
-    RankedList
-        New list sorted by ``score`` descending.  The input list is not
-        mutated.
+    list[ScoredCandidate]
+        New list sorted by ``score`` descending, ``item_id`` ascending on
+        ties.  The input list is not mutated.
     """
-    return sorted(candidates, key=lambda c: c.score, reverse=True)
+    return sorted(candidates, key=lambda c: (-c.score, c.item_id))
 
 
 def _mmr_rerank(
-    candidates: list[ScoredCandidate],
+    candidates: List[ScoredCandidate],
     diversity_weight: float,
     mmr_penalty: float,
-) -> RankedList:
+) -> List[ScoredCandidate]:
     """
     Apply a category-aware Maximal Marginal Relevance (MMR) variant to
     reduce consecutive items from the same dataset category.
@@ -165,6 +212,7 @@ def _mmr_rerank(
                           else 0.0
 
       2. Select the candidate with the highest effective score.
+         Ties in effective score are broken by ``item_id`` ascending.
       3. Record its category in ``selected_categories``.
       4. Repeat until no candidates remain.
 
@@ -184,11 +232,11 @@ def _mmr_rerank(
 
     Returns
     -------
-    RankedList
+    list[ScoredCandidate]
         Diversity-re-ranked list of all input candidates.
     """
-    remaining: list[ScoredCandidate] = list(candidates)
-    selected: RankedList = []
+    remaining: List[ScoredCandidate] = list(candidates)
+    selected: List[ScoredCandidate] = []
     selected_categories: set[str] = set()
 
     lambda_ = diversity_weight
@@ -201,12 +249,20 @@ def _mmr_rerank(
         for candidate in remaining:
             category_penalty = (
                 mmr_penalty
-                if (candidate.category is not None and candidate.category in selected_categories)
+                if (
+                    candidate.category is not None
+                    and candidate.category in selected_categories
+                )
                 else 0.0
             )
             effective = relevance_weight * candidate.score - lambda_ * category_penalty
 
-            if effective > best_effective:
+            # Tie-break on item_id ascending for determinism
+            if effective > best_effective or (
+                effective == best_effective
+                and best is not None
+                and candidate.item_id < best.item_id
+            ):
                 best_effective = effective
                 best = candidate
 
@@ -221,20 +277,22 @@ def _mmr_rerank(
     return selected
 
 
-def _apply_top_n(ranked: RankedList, top_n: Optional[int]) -> RankedList:
+def _apply_top_n(
+    ranked: List[ScoredCandidate], top_n: Optional[int]
+) -> List[ScoredCandidate]:
     """
     Trim a ranked list to at most ``top_n`` items.
 
     Parameters
     ----------
     ranked:
-        Already-ordered RankedList.
+        Already-ordered list of ScoredCandidates.
     top_n:
         Maximum number of items to keep.  ``None`` returns the full list.
 
     Returns
     -------
-    RankedList
+    list[ScoredCandidate]
         Trimmed (or unchanged) list.
     """
     if top_n is None:
@@ -248,7 +306,7 @@ def _apply_top_n(ranked: RankedList, top_n: Optional[int]) -> RankedList:
 
 
 def rank(
-    scored_candidates: list[ScoredCandidate],
+    scored_candidates: List[ScoredCandidate],
     user_id: int,
     config: Optional[RankingConfig] = None,
 ) -> RankedList:
@@ -262,10 +320,12 @@ def rank(
     Steps
     -----
     1. Use default ``RankingConfig`` if none is supplied.
-    2. Short-circuit and return ``[]`` if the input is empty.
+    2. Short-circuit and return an empty ``RankedList`` if the input is empty.
     3. If ``diversity_weight > 0``, apply MMR re-ranking.
        Otherwise sort by score descending (faster, no penalty logic).
-    4. Trim to ``top_n`` and return.
+       Ties are always broken by ``item_id`` ascending for determinism.
+    4. Trim to ``top_n``.
+    5. Wrap in a ``RankedList`` with a ``generated_at`` UTC timestamp and return.
 
     Parameters
     ----------
@@ -281,7 +341,9 @@ def rank(
     Returns
     -------
     RankedList
-        Ordered, trimmed list of ``ScoredCandidate`` objects.
+        Ordered, trimmed ``RankedList`` with a ``generated_at`` timestamp.
+        Returns an empty ``RankedList`` (not an error) when
+        ``scored_candidates`` is empty.
 
     Examples
     --------
@@ -293,19 +355,31 @@ def rank(
     >>> result = rank(candidates, user_id=42)
     >>> [c.item_id for c in result]
     [1, 2, 3]
+    >>> result.generated_at  # UTC timestamp attached automatically
+    datetime.datetime(...)
 
     With diversity re-ranking (λ=0.4, penalty=0.5):
+
     >>> cfg = RankingConfig(diversity_weight=0.4, mmr_penalty=0.5, top_n=3)
     >>> result = rank(candidates, user_id=42, config=cfg)
     # item 2 (geo) is penalised after item 1 (geo) is selected, so
     # item 3 (health) may leapfrog it depending on effective scores.
+
+    Tie-breaking:
+
+    >>> tied = [
+    ...     ScoredCandidate(item_id=5, score=0.7),
+    ...     ScoredCandidate(item_id=2, score=0.7),
+    ... ]
+    >>> [c.item_id for c in rank(tied, user_id=1)]
+    [2, 5]  # lower item_id wins on equal score
     """
     if config is None:
         config = RankingConfig()
 
     if not scored_candidates:
         logger.debug("ranking.rank: empty candidate list for user_id=%d", user_id)
-        return []
+        return RankedList()
 
     logger.debug(
         "ranking.rank: user_id=%d, n_candidates=%d, top_n=%s, diversity_weight=%.3f",
@@ -317,7 +391,7 @@ def rank(
 
     # --- step 3: order candidates ----------------------------------------
     if config.diversity_weight > 0.0:
-        ranked = _mmr_rerank(
+        ordered = _mmr_rerank(
             candidates=scored_candidates,
             diversity_weight=config.diversity_weight,
             mmr_penalty=config.mmr_penalty,
@@ -328,15 +402,19 @@ def rank(
             config.mmr_penalty,
         )
     else:
-        ranked = _sort_by_score(scored_candidates)
+        ordered = _sort_by_score(scored_candidates)
 
     # --- step 4: trim to Top-N -------------------------------------------
-    ranked = _apply_top_n(ranked, config.top_n)
+    ordered = _apply_top_n(ordered, config.top_n)
+
+    # --- step 5: wrap with metadata and return ---------------------------
+    result = RankedList(items=ordered)
 
     logger.info(
-        "ranking.rank: user_id=%d → returning %d ranked items",
+        "ranking.rank: user_id=%d → returning %d ranked items (generated_at=%s)",
         user_id,
-        len(ranked),
+        len(result),
+        result.generated_at.isoformat(),
     )
 
-    return ranked
+    return result
