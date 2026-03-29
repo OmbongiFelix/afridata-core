@@ -20,12 +20,11 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Optional
 
-from candidate_generation import CandidateSet
-from collaborative import CollaborativeEngine
-from content_based import ContentBasedEngine, WEIGHT_DOWNLOAD, WEIGHT_VIEW, WEIGHT_IMPLICIT
-from domain.ranking import RankedList, ScoredCandidate, rank
+from recommendations.domain.engines.collaborative import CollaborativeEngine
+from recommendations.domain.engines.content_based import ContentBasedEngine
+from recommendations.domain.schemas import CandidateSet, RankedList, ScoredCandidate
+from recommendations.domain import ranking
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +78,7 @@ class EngineConfig:
         Used to build the CBF user profile vector.
     interaction_weights:
         Parallel list of weights for each interaction in
-        ``interacted_item_ids``.  Use the ``WEIGHT_*`` constants from
+        ``interacted_item_ids``.  Use the WEIGHT_* constants from
         content_based.py (WEIGHT_DOWNLOAD, WEIGHT_VIEW, WEIGHT_IMPLICIT).
     auto_cold_start:
         If ``True`` (default), override alpha to ``COLD_START_ALPHA``
@@ -102,100 +101,6 @@ class EngineConfig:
             raise ValueError(
                 "interacted_item_ids and interaction_weights must have the same length."
             )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers
-# ---------------------------------------------------------------------------
-
-
-def _fuse_scores(
-    s_cf: dict[int, float],
-    s_cbf: dict[int, float],
-    alpha: float,
-) -> dict[int, float]:
-    """
-    Apply the weighted fusion formula to produce hybrid scores.
-
-    Formula: S_hybrid[i] = α · S_CF[i] + (1 − α) · S_CBF[i]
-
-    Items present in one dict but absent in the other are treated as 0.0.
-
-    Parameters
-    ----------
-    s_cf:
-        Collaborative filtering scores, mapping dataset_id → score.
-    s_cbf:
-        Content-based filtering scores, mapping dataset_id → score.
-    alpha:
-        Blend weight for S_CF.  Must be in [0.0, 1.0].
-
-    Returns
-    -------
-    dict[int, float]
-        Fused scores for the union of both input key sets.
-    """
-    all_ids = set(s_cf) | set(s_cbf)
-    beta = 1.0 - alpha
-
-    fused: dict[int, float] = {}
-    for item_id in all_ids:
-        cf_score = s_cf.get(item_id, 0.0)
-        cbf_score = s_cbf.get(item_id, 0.0)
-        fused[item_id] = alpha * cf_score + beta * cbf_score
-
-    return fused
-
-
-def _minmax_normalise(scores: dict[int, float]) -> dict[int, float]:
-    """
-    Min-max normalise a ``{item_id: score}`` dict to [0.0, 1.0].
-
-    If all scores are identical (including all-zero), every item maps to 0.0.
-
-    Parameters
-    ----------
-    scores:
-        Raw fused scores.
-
-    Returns
-    -------
-    dict[int, float]
-        Normalised scores in [0.0, 1.0].
-    """
-    if not scores:
-        return {}
-
-    min_val = min(scores.values())
-    max_val = max(scores.values())
-
-    if max_val == min_val:
-        return {k: 0.0 for k in scores}
-
-    span = max_val - min_val
-    return {k: (v - min_val) / span for k, v in scores.items()}
-
-
-def _build_scored_candidates(
-    normalised_scores: dict[int, float],
-) -> list[ScoredCandidate]:
-    """
-    Convert a normalised score dict into a list of ScoredCandidate objects.
-
-    Parameters
-    ----------
-    normalised_scores:
-        Mapping of dataset_id → normalised hybrid score.
-
-    Returns
-    -------
-    list[ScoredCandidate]
-        Unsorted list; ordering is delegated to domain/ranking.py.
-    """
-    return [
-        ScoredCandidate(item_id=item_id, score=score)
-        for item_id, score in normalised_scores.items()
-    ]
 
 
 # ---------------------------------------------------------------------------
@@ -251,23 +156,49 @@ class WeightedHybridEngine:
         self._cf = collaborative_engine
         self._cbf = content_based_engine
 
-    # ------------------------------------------------------------------
-    # Validation
-    # ------------------------------------------------------------------
+    def fuse(
+        self,
+        cf_scores: dict[int, float],
+        cbf_scores: dict[int, float],
+        alpha: float,
+    ) -> list[ScoredCandidate]:
+        """
+        Apply weighted fusion and return a normalised ScoredCandidate list.
 
-    def _require_engines_loaded(self) -> None:
-        if not self._cf.is_loaded:
-            raise HybridEngineError(
-                "CollaborativeEngine has not been loaded. Call engine.load() first."
-            )
-        if not self._cbf.is_loaded:
-            raise HybridEngineError(
-                "ContentBasedEngine has not been loaded. Call engine.load() first."
-            )
+        Exposed as a public method so callers can invoke fusion directly
+        with pre-computed scores (e.g. in tests or batch pipelines) without
+        going through the full recommend() orchestration.
 
-    # ------------------------------------------------------------------
-    # Main entry point
-    # ------------------------------------------------------------------
+        Formula: S_hybrid[i] = α · S_CF[i] + (1 − α) · S_CBF[i]
+
+        Items present in one dict but absent in the other are treated as 0.0.
+        Fused scores are min-max normalised to [0.0, 1.0] before wrapping.
+
+        Parameters
+        ----------
+        cf_scores:
+            Collaborative filtering scores, mapping dataset_id → score.
+        cbf_scores:
+            Content-based filtering scores, mapping dataset_id → score.
+        alpha:
+            Blend weight for S_CF.  Must be in [0.0, 1.0].
+            alpha=1.0 → CF only;  alpha=0.0 → CBF only.
+
+        Returns
+        -------
+        list[ScoredCandidate]
+            Unsorted; ordering is delegated to ranking.rank().
+        """
+        all_ids = set(cf_scores) | set(cbf_scores)
+        beta = 1.0 - alpha
+
+        fused: dict[int, float] = {
+            item_id: alpha * cf_scores.get(item_id, 0.0) + beta * cbf_scores.get(item_id, 0.0)
+            for item_id in all_ids
+        }
+
+        normalised = _minmax_normalise(fused)
+        return [ScoredCandidate(item_id=k, score=v) for k, v in normalised.items()]
 
     def recommend(
         self,
@@ -348,23 +279,17 @@ class WeightedHybridEngine:
                 COLD_START_ALPHA,
             )
 
-        # ---- step 5: weighted fusion ------------------------------------
-        fused: dict[int, float] = _fuse_scores(s_cf, s_cbf, effective_alpha)
+        # ---- steps 5-7: fuse, normalise, and build ScoredCandidates ----
+        scored_candidates: list[ScoredCandidate] = self.fuse(s_cf, s_cbf, effective_alpha)
 
         logger.debug(
             "hybrid.recommend: fused %d scores with alpha=%.3f",
-            len(fused),
+            len(scored_candidates),
             effective_alpha,
         )
 
-        # ---- step 6: normalise to [0, 1] --------------------------------
-        normalised: dict[int, float] = _minmax_normalise(fused)
-
-        # ---- step 7: build ScoredCandidate list -------------------------
-        scored_candidates: list[ScoredCandidate] = _build_scored_candidates(normalised)
-
         # ---- step 8: delegate ordering to ranking -----------------------
-        ranked_list: RankedList = rank(
+        ranked_list: RankedList = ranking.rank(
             scored_candidates=scored_candidates,
             user_id=user_id,
         )
@@ -376,3 +301,51 @@ class WeightedHybridEngine:
         )
 
         return ranked_list
+
+    def _require_engines_loaded(self) -> None:
+        if not self._cf.is_loaded:
+            raise HybridEngineError(
+                "CollaborativeEngine has not been loaded. Call engine.load() first."
+            )
+        if not self._cbf.is_loaded:
+            raise HybridEngineError(
+                "ContentBasedEngine has not been loaded. Call engine.load() first."
+            )
+
+
+# Alias for spec-compliance; WeightedHybridEngine is the canonical name.
+HybridEngine = WeightedHybridEngine
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
+
+def _minmax_normalise(scores: dict[int, float]) -> dict[int, float]:
+    """
+    Min-max normalise a ``{item_id: score}`` dict to [0.0, 1.0].
+
+    If all scores are identical (including all-zero), every item maps to 0.0.
+
+    Parameters
+    ----------
+    scores:
+        Raw fused scores.
+
+    Returns
+    -------
+    dict[int, float]
+        Normalised scores in [0.0, 1.0].
+    """
+    if not scores:
+        return {}
+
+    min_val = min(scores.values())
+    max_val = max(scores.values())
+
+    if max_val == min_val:
+        return {k: 0.0 for k in scores}
+
+    span = max_val - min_val
+    return {k: (v - min_val) / span for k, v in scores.items()}
