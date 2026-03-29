@@ -27,6 +27,14 @@ from django.conf import settings
 
 logger = logging.getLogger(__name__)
 
+__all__ = [
+    "VectorStoreError",
+    "save_tfidf_matrix",
+    "load_tfidf_matrix",
+    "save_item_vectors",
+    "load_item_vectors",
+]
+
 # ---------------------------------------------------------------------------
 # Exceptions
 # ---------------------------------------------------------------------------
@@ -100,14 +108,18 @@ def _load_sparse_local(path: str) -> scipy.sparse.csr_matrix:
 
 def _save_array_local(array: np.ndarray, path: str) -> None:
     _ensure_dir(path)
-    np.save(path, array)
+    np.save(path, array, allow_pickle=False)
     logger.debug("vector_store: array saved to '%s'", path)
 
 
 def _load_array_local(path: str) -> np.ndarray:
-    # np.save appends .npy automatically; handle both forms.
-    resolved = path if os.path.exists(path) else f"{path}.npy" if os.path.exists(f"{path}.npy") else path
-    if not os.path.exists(resolved):
+    # np.save appends .npy automatically; resolve the real path before
+    # opening so the error message always names the file that is missing.
+    if os.path.exists(path):
+        resolved = path
+    elif path.endswith(".npy") is False and os.path.exists(f"{path}.npy"):
+        resolved = f"{path}.npy"
+    else:
         raise VectorStoreError(
             f"Item ID index file not found at '{path}'. "
             "Run train_content_based to rebuild the matrix."
@@ -172,7 +184,15 @@ def _download_bytes(key: str) -> BytesIO:
                 f"Object not found at s3://{bucket}/{key}. "
                 "Run train_content_based to rebuild the matrix."
             ) from exc
-        raise
+        raise VectorStoreError(
+            f"S3 client error fetching s3://{bucket}/{key}: {exc}"
+        ) from exc
+    except botocore.exceptions.BotoCoreError as exc:
+        # Covers connection errors, timeouts, and other low-level failures
+        # that are not ClientError subclasses.
+        raise VectorStoreError(
+            f"S3 transport error fetching s3://{bucket}/{key}: {exc}"
+        ) from exc
     buf.seek(0)
     logger.debug("vector_store: downloaded s3://%s/%s", bucket, key)
     return buf
@@ -234,6 +254,16 @@ def save_tfidf_matrix(
     VectorStoreError
         If writing fails for any reason.
     """
+    if item_ids.ndim != 1:
+        raise VectorStoreError(
+            f"item_ids must be a 1-D array; got shape {item_ids.shape}."
+        )
+    if matrix.shape[0] != len(item_ids):
+        raise VectorStoreError(
+            f"matrix row count ({matrix.shape[0]}) does not match "
+            f"item_ids length ({len(item_ids)})."
+        )
+
     backend = _backend()
     matrix_key = _matrix_path(path)
     index_key = _index_path(path)
@@ -286,7 +316,8 @@ def load_tfidf_matrix(
     Raises
     ------
     VectorStoreError
-        If either file is missing or cannot be deserialised.
+        If either file is missing, cannot be deserialised, or the loaded
+        matrix and index array have incompatible lengths.
     """
     backend = _backend()
     matrix_key = _matrix_path(path)
@@ -314,6 +345,15 @@ def load_tfidf_matrix(
         raise VectorStoreError(
             f"Failed to load TF-IDF matrix from '{path}': {exc}"
         ) from exc
+
+    # Guard against a stale index file that no longer matches the matrix,
+    # e.g. if the matrix was retrained but the index write was interrupted.
+    if matrix.shape[0] != len(item_ids):
+        raise VectorStoreError(
+            f"Loaded matrix row count ({matrix.shape[0]}) does not match "
+            f"item_ids length ({len(item_ids)}) for path '{path}'. "
+            "The store may be corrupt — re-run train_content_based."
+        )
 
     logger.info(
         "vector_store: loaded matrix shape=%s item_ids=%d",
@@ -346,6 +386,11 @@ def save_item_vectors(vectors: np.ndarray, path: str) -> None:
     VectorStoreError
         If writing fails.
     """
+    if vectors.ndim != 2:
+        raise VectorStoreError(
+            f"vectors must be a 2-D array; got shape {vectors.shape}."
+        )
+
     backend = _backend()
     key = _vectors_path(path)
 
@@ -389,7 +434,8 @@ def load_item_vectors(path: str) -> np.ndarray:
     Raises
     ------
     VectorStoreError
-        If the file is missing or cannot be deserialised.
+        If the file is missing, cannot be deserialised, or the loaded
+        array is not 2-D.
     """
     backend = _backend()
     key = _vectors_path(path)
@@ -400,17 +446,28 @@ def load_item_vectors(path: str) -> np.ndarray:
 
     try:
         if backend == "s3":
-            return _load_array_s3(key)
+            vectors = _load_array_s3(key)
         else:
             if backend != "local":
                 logger.warning(
                     "vector_store: unknown backend '%s', falling back to 'local'",
                     backend,
                 )
-            return _load_array_local(key)
+            vectors = _load_array_local(key)
     except VectorStoreError:
         raise
     except Exception as exc:
         raise VectorStoreError(
             f"Failed to load item vectors from '{path}': {exc}"
         ) from exc
+
+    if vectors.ndim != 2:
+        raise VectorStoreError(
+            f"Expected a 2-D array from '{path}'; got shape {vectors.shape}. "
+            "The file may be corrupt or was saved by a different version."
+        )
+
+    logger.info(
+        "vector_store: loaded item vectors shape=%s", vectors.shape
+    )
+    return vectors
