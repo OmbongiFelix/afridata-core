@@ -71,20 +71,49 @@ def _deserialise(raw: str) -> RankedList:
     Raises
     ------
     ValueError
-        If the JSON is malformed or missing required fields.
+        If the JSON is malformed or missing required fields, or if any
+        field has an unexpected type/value.
     """
-    data = json.loads(raw)
-    items = [
-        ScoredCandidate(
-            item_id=entry["item_id"],
-            s_cf=entry["s_cf"],
-            s_cbf=entry["s_cbf"],
-            s_hybrid=entry["s_hybrid"],
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Cache entry is not valid JSON: {exc}") from exc
+
+    # Validate top-level required fields before accessing them.
+    missing = {"user_id", "generated_at", "items"} - data.keys()
+    if missing:
+        raise ValueError(f"Cache entry missing required fields: {missing}")
+
+    raw_items = data["items"]
+    if not isinstance(raw_items, list):
+        raise ValueError(
+            f"Expected 'items' to be a list, got {type(raw_items).__name__}"
         )
-        for entry in data["items"]
-    ]
-    generated_at = datetime.fromisoformat(data["generated_at"])
-    # Ensure timezone-aware if it was stored as UTC naive
+
+    items: list[ScoredCandidate] = []
+    for i, entry in enumerate(raw_items):
+        item_missing = {"item_id", "s_cf", "s_cbf", "s_hybrid"} - entry.keys()
+        if item_missing:
+            raise ValueError(
+                f"Item at index {i} missing required fields: {item_missing}"
+            )
+        items.append(
+            ScoredCandidate(
+                item_id=entry["item_id"],
+                s_cf=entry["s_cf"],
+                s_cbf=entry["s_cbf"],
+                s_hybrid=entry["s_hybrid"],
+            )
+        )
+
+    try:
+        generated_at = datetime.fromisoformat(data["generated_at"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"Invalid 'generated_at' value {data['generated_at']!r}: {exc}"
+        ) from exc
+
+    # Ensure timezone-aware; treat naive timestamps as UTC.
     if generated_at.tzinfo is None:
         generated_at = generated_at.replace(tzinfo=timezone.utc)
 
@@ -123,7 +152,8 @@ def get_cached_recommendations(user_id: int) -> RankedList | None:
         raw = cache.get(key)
     except Exception:
         logger.warning(
-            "Cache backend unavailable during get — user_id=%s", user_id,
+            "Cache backend unavailable during get — user_id=%s",
+            user_id,
             exc_info=True,
         )
         return None
@@ -134,9 +164,10 @@ def get_cached_recommendations(user_id: int) -> RankedList | None:
 
     try:
         ranked_list = _deserialise(raw)
-    except (KeyError, ValueError, json.JSONDecodeError):
+    except ValueError:
         logger.warning(
-            "Corrupt cache entry for user_id=%s; treating as miss", user_id,
+            "Corrupt cache entry for user_id=%s; treating as miss",
+            user_id,
             exc_info=True,
         )
         return None
@@ -164,7 +195,18 @@ def set_cached_recommendations(
         The :class:`~recommendations.domain.schemas.RankedList` to cache.
     ttl:
         Time-to-live in seconds.  Defaults to 3600 (1 hour).
+        A value of 0 or below is accepted by the cache backend (meaning
+        "do not cache"), but a warning is logged as this is likely a
+        misconfiguration.
     """
+    if ttl <= 0:
+        logger.warning(
+            "set_cached_recommendations called with ttl=%s for user_id=%s; "
+            "entry will not be stored",
+            ttl,
+            user_id,
+        )
+
     key = _cache_key(user_id)
     try:
         cache.set(key, _serialise(ranked_list), timeout=ttl)
@@ -176,7 +218,8 @@ def set_cached_recommendations(
         )
     except Exception:
         logger.warning(
-            "Cache backend unavailable during set — user_id=%s", user_id,
+            "Cache backend unavailable during set — user_id=%s",
+            user_id,
             exc_info=True,
         )
 
@@ -203,6 +246,7 @@ def invalidate_user_cache(user_id: int) -> None:
         logger.debug("Cache invalidated — user_id=%s", user_id)
     except Exception:
         logger.warning(
-            "Cache backend unavailable during delete — user_id=%s", user_id,
+            "Cache backend unavailable during delete — user_id=%s",
+            user_id,
             exc_info=True,
         )
