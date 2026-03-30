@@ -22,19 +22,19 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 import numpy as np
+from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from scipy.sparse import csr_matrix
 from sklearn.decomposition import TruncatedSVD
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
 
+from recommendations.domain.evaluation import evaluate_engine
 from recommendations.infrastructure.model_store import save_model
-from recommendations.persistence import get_all_dataset_ids, get_user_interactions
-from recommendations.models import UserInteraction
+from recommendations.infrastructure.persistence import get_user_interactions
 
 logger = logging.getLogger(__name__)
 
@@ -42,7 +42,6 @@ logger = logging.getLogger(__name__)
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_MODEL_PATH = "models/collaborative/cf_model.joblib"
 DEFAULT_FACTORS = 50
 DEFAULT_EPOCHS = 20
 DEFAULT_TEST_SIZE = 0.2
@@ -180,7 +179,7 @@ def _train_svd(
     n_factors: int,
     n_epochs: int,
     stdout,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Fit TruncatedSVD (randomised SVD) on the interaction matrix.
 
@@ -191,6 +190,7 @@ def _train_svd(
     -------
     user_factors : np.ndarray  shape (n_users, n_factors)
     item_factors : np.ndarray  shape (n_items, n_factors)
+    loss         : float       reconstruction loss (1 - explained variance ratio sum)
     """
     stdout.write(
         f"  Fitting TruncatedSVD: n_components={n_factors}, "
@@ -201,8 +201,9 @@ def _train_svd(
     item_factors = svd.components_.T                   # (n_items, n_factors)
 
     explained = svd.explained_variance_ratio_.sum()
-    stdout.write(f"  SVD explained variance: {explained:.2%}")
-    return user_factors, item_factors
+    loss = 1.0 - explained
+    stdout.write(f"  SVD explained variance: {explained:.2%}  |  Final loss (unexplained variance): {loss:.4f}")
+    return user_factors, item_factors, loss
 
 
 def _train_als(
@@ -210,7 +211,7 @@ def _train_als(
     n_factors: int,
     n_epochs: int,
     stdout,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[np.ndarray, np.ndarray, float]:
     """
     Fit an implicit ALS model via the ``implicit`` library.
 
@@ -221,6 +222,7 @@ def _train_als(
     -------
     user_factors : np.ndarray  shape (n_users, n_factors)
     item_factors : np.ndarray  shape (n_items, n_factors)
+    loss         : float       final training loss reported by the ALS model
     """
     try:
         import implicit  # optional production dependency
@@ -241,82 +243,23 @@ def _train_als(
         iterations=n_epochs,
         use_gpu=False,
         random_state=42,
+        calculate_training_loss=True,
     )
     model.fit(item_user_matrix)
 
     # implicit stores factors as (n_items, factors) and (n_users, factors)
     item_factors = model.item_factors   # np.ndarray
     user_factors = model.user_factors   # np.ndarray
-    return user_factors, item_factors
 
+    # Retrieve the last recorded training loss if available
+    loss: float = float("nan")
+    if hasattr(model, "loss_") and model.loss_:
+        loss = float(model.loss_[-1])
+    elif hasattr(model, "loss"):
+        loss = float(model.loss)
+    stdout.write(f"  ALS final training loss: {loss:.4f}")
 
-# ---------------------------------------------------------------------------
-# Evaluation
-# ---------------------------------------------------------------------------
-
-
-def _evaluate(
-    user_factors: np.ndarray,
-    item_factors: np.ndarray,
-    test_records: list[InteractionRecord],
-    user_encoder: LabelEncoder,
-    item_encoder: LabelEncoder,
-    top_k: int = 10,
-    stdout=None,
-) -> dict[str, float]:
-    """
-    Compute Precision@K and Recall@K on a held-out test set.
-
-    For each user in the test set, the predicted top-K items are compared
-    against the ground-truth interacted items.
-
-    Parameters
-    ----------
-    user_factors, item_factors:
-        Trained latent factor matrices.
-    test_records:
-        Held-out interactions not seen during training.
-    user_encoder, item_encoder:
-        Encoders fitted on the full dataset (both train and test IDs are
-        present so transform never raises).
-    top_k:
-        Cut-off rank for precision / recall.
-
-    Returns
-    -------
-    dict with keys 'precision_at_k', 'recall_at_k', 'top_k'.
-    """
-    # Group test records by user
-    user_to_items: dict[int, set[int]] = {}
-    for rec in test_records:
-        user_to_items.setdefault(rec.user_id, set()).add(rec.item_id)
-
-    precisions, recalls = [], []
-
-    for user_id, true_items in user_to_items.items():
-        # Skip users not seen during training (cold-start)
-        try:
-            u_idx = user_encoder.transform([user_id])[0]
-        except ValueError:
-            continue
-
-        # Score all items
-        u_vec = user_factors[u_idx]                          # (n_factors,)
-        scores = item_factors @ u_vec                        # (n_items,)
-        top_k_indices = np.argpartition(scores, -top_k)[-top_k:]
-        top_k_item_ids = set(item_encoder.inverse_transform(top_k_indices))
-
-        hits = len(top_k_item_ids & true_items)
-        precisions.append(hits / top_k)
-        recalls.append(hits / len(true_items) if true_items else 0.0)
-
-    metrics = {
-        "precision_at_k": float(np.mean(precisions)) if precisions else 0.0,
-        "recall_at_k": float(np.mean(recalls)) if recalls else 0.0,
-        "top_k": top_k,
-        "n_test_users": len(precisions),
-    }
-    return metrics
+    return user_factors, item_factors, loss
 
 
 # ---------------------------------------------------------------------------
@@ -354,15 +297,18 @@ class Command(BaseCommand):
         parser.add_argument(
             "--output",
             type=str,
-            default=DEFAULT_MODEL_PATH,
+            default=None,
             metavar="PATH",
-            help=f"Override the default model save path (default: {DEFAULT_MODEL_PATH}).",
+            help=(
+                "Override the default model save path. "
+                "Defaults to settings.CF_MODEL_PATH if not provided."
+            ),
         )
         parser.add_argument(
             "--evaluate",
             action="store_true",
             default=False,
-            help="Hold out a test split and report Precision@K / Recall@K after training.",
+            help="Hold out a test split and report Precision@10 / NDCG@10 after training.",
         )
         parser.add_argument(
             "--test-size",
@@ -383,7 +329,7 @@ class Command(BaseCommand):
         n_factors: int = options["factors"]
         n_epochs: int = options["epochs"]
         algo: str = options["algo"]
-        output_path: str = options["output"]
+        output_path: str = options["output"] or settings.CF_MODEL_PATH
         do_evaluate: bool = options["evaluate"]
         test_size: float = options["test_size"]
 
@@ -393,11 +339,13 @@ class Command(BaseCommand):
         )
         self.stdout.write(f"  output path: {output_path}")
 
+        t0 = time.perf_counter()
+
         # ------------------------------------------------------------------
         # 1. Fetch interactions
         # ------------------------------------------------------------------
         self.stdout.write("\n[1/4] Fetching interactions from database …")
-        t0 = time.perf_counter()
+        t_fetch = time.perf_counter()
 
         all_records = _fetch_all_interactions()
 
@@ -409,7 +357,7 @@ class Command(BaseCommand):
 
         self.stdout.write(
             f"  Loaded {len(all_records):,} interaction records in "
-            f"{time.perf_counter() - t0:.1f}s."
+            f"{time.perf_counter() - t_fetch:.1f}s."
         )
 
         # ------------------------------------------------------------------
@@ -448,7 +396,7 @@ class Command(BaseCommand):
         # 3. Build sparse matrix and fit model
         # ------------------------------------------------------------------
         self.stdout.write("\n[3/4] Building interaction matrix and training …")
-        t1 = time.perf_counter()
+        t_train = time.perf_counter()
 
         interaction_matrix = _build_interaction_matrix(
             train_records, user_encoder, item_encoder
@@ -459,38 +407,55 @@ class Command(BaseCommand):
         )
 
         if algo == "als":
-            user_factors, item_factors = _train_als(
+            user_factors, item_factors, final_loss = _train_als(
                 interaction_matrix, n_factors, n_epochs, self.stdout
             )
         else:
-            user_factors, item_factors = _train_svd(
+            user_factors, item_factors, final_loss = _train_svd(
                 interaction_matrix, n_factors, n_epochs, self.stdout
             )
 
+        elapsed_train = time.perf_counter() - t_train
         self.stdout.write(
-            f"  Training complete in {time.perf_counter() - t1:.1f}s."
+            f"  Training complete in {elapsed_train:.1f}s.  Final loss: {final_loss:.4f}"
         )
 
         # ------------------------------------------------------------------
-        # 4. (Optional) Evaluate
+        # 4. (Optional) Evaluate via domain evaluate_engine
         # ------------------------------------------------------------------
         if do_evaluate and test_records:
             self.stdout.write("\n[4a/4] Evaluating on held-out test set …")
-            metrics = _evaluate(
-                user_factors,
-                item_factors,
-                test_records,
-                user_encoder,
-                item_encoder,
-                top_k=10,
-                stdout=self.stdout,
+
+            # Build a temporary model snapshot to pass into evaluate_engine
+            eval_model = TrainedModel(
+                user_factors=user_factors.astype(np.float32),
+                item_factors=item_factors.astype(np.float32),
+                user_encoder=user_encoder,
+                item_encoder=item_encoder,
+                algorithm=algo,
+                n_factors=n_factors,
+                n_epochs=n_epochs,
             )
+
+            metrics: dict[str, Any] = evaluate_engine(
+                model=eval_model,
+                test_interactions=test_records,
+                top_k=10,
+            )
+
+            precision = metrics.get("precision_at_10", metrics.get("precision_at_k", float("nan")))
+            ndcg = metrics.get("ndcg_at_10", metrics.get("ndcg_at_k", float("nan")))
+
             self.stdout.write(
                 self.style.SUCCESS(
-                    f"  Precision@{metrics['top_k']}: {metrics['precision_at_k']:.4f}  "
-                    f"Recall@{metrics['top_k']}: {metrics['recall_at_k']:.4f}  "
-                    f"(over {metrics['n_test_users']:,} test users)"
+                    f"  Precision@10: {precision:.4f}  |  NDCG@10: {ndcg:.4f}  "
+                    f"(n_test_users={metrics.get('n_test_users', '?')})"
                 )
+            )
+            logger.info(
+                "Evaluation complete — Precision@10=%.4f  NDCG@10=%.4f",
+                precision,
+                ndcg,
             )
 
         # ------------------------------------------------------------------
@@ -511,9 +476,20 @@ class Command(BaseCommand):
 
         save_model(trained_model, output_path)
 
+        total_elapsed = time.perf_counter() - t0
         self.stdout.write(
             self.style.SUCCESS(
                 f"\n✓ Model saved to '{output_path}'.  "
-                f"Total elapsed: {time.perf_counter() - t0:.1f}s."
+                f"Total elapsed: {total_elapsed:.1f}s."
             )
+        )
+        logger.info(
+            "train_collaborative complete — algo=%s factors=%d epochs=%d "
+            "loss=%.4f elapsed=%.1fs path=%s",
+            algo,
+            n_factors,
+            n_epochs,
+            final_loss,
+            total_elapsed,
+            output_path,
         )
