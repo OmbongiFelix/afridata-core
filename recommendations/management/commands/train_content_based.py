@@ -8,6 +8,8 @@ and saves the resulting item matrix via infrastructure/vector_store.py.
 Options:
   --max-features  TF-IDF vocabulary size (default: 10000)
   --ngram-range   N-gram range, e.g. '1,2' for unigrams+bigrams (default: 1,1)
+  --min-df        Minimum document frequency for vocabulary inclusion (default: 1)
+  --sublinear-tf  Apply sublinear TF scaling — 1 + log(tf) (default: off)
   --output        Override default matrix save path
 
 Incremental updates are not supported — always a full rebuild.
@@ -25,13 +27,19 @@ from django.conf import settings
 from django.core.management.base import BaseCommand, CommandError
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from recommendations.infrastructure.persistence import get_all_datasets
 from recommendations.infrastructure.vector_store import (
     VectorStoreError,
     save_tfidf_matrix,
 )
-from recommendations.persistence import get_all_datasets
 
 logger = logging.getLogger(__name__)
+
+# Placeholder injected for datasets whose title, description, and tags are all
+# blank.  A non-empty string is required so TF-IDF produces a real (albeit
+# low-signal) vector rather than a silent zero-vector that would permanently
+# exclude the item from content-based recommendations.
+_EMPTY_DOC_PLACEHOLDER = "__no_content__"
 
 # Default save path — can be overridden via --output or settings.
 _DEFAULT_MATRIX_PATH_SETTING = "TFIDF_MATRIX_PATH"
@@ -56,7 +64,10 @@ def _build_corpus(datasets) -> tuple[list[str], list[int]]:
       2. description     — free-text body
       3. tags            — space-joined tag strings for keyword matching
 
-    Fields are gracefully skipped when blank or ``None``.
+    Fields are gracefully skipped when blank or ``None``.  If all three
+    fields are empty the document is replaced with ``_EMPTY_DOC_PLACEHOLDER``
+    so that TF-IDF still produces a real (low-signal) vector for that item
+    rather than a silent zero-vector.
 
     Parameters
     ----------
@@ -103,7 +114,14 @@ def _build_corpus(datasets) -> tuple[list[str], list[int]]:
             if tag_str.strip():
                 parts.append(tag_str)
 
-        corpus.append(" ".join(parts).strip())
+        document = " ".join(parts).strip()
+
+        # Substitute placeholder so the item is never silently excluded from
+        # recommendations due to a zero-vector.
+        if not document:
+            document = _EMPTY_DOC_PLACEHOLDER
+
+        corpus.append(document)
         item_ids.append(int(dataset.dataset_id))
 
     return corpus, item_ids
@@ -236,15 +254,20 @@ class Command(BaseCommand):
                 "Sync datasets before running this command."
             )
 
-        # Warn if any documents are empty (title + description + tags all blank).
-        empty_count = sum(1 for doc in corpus if not doc.strip())
-        if empty_count:
+        # Warn about datasets that had no text content and received a
+        # placeholder.  They will still be vectorised but will produce
+        # low-signal vectors and are unlikely to surface in recommendations.
+        placeholder_count = sum(
+            1 for doc in corpus if doc == _EMPTY_DOC_PLACEHOLDER
+        )
+        if placeholder_count:
             self.stderr.write(
                 self.style.WARNING(
-                    f"WARNING: {empty_count} dataset(s) have no text content "
-                    "(empty title, description, and tags).  "
-                    "They will produce zero-vectors and will never be "
-                    "recommended via content-based similarity."
+                    f"WARNING: {placeholder_count} dataset(s) have no text "
+                    "content (empty title, description, and tags).  "
+                    f"A '{_EMPTY_DOC_PLACEHOLDER}' placeholder has been "
+                    "substituted so they remain in the index, but they are "
+                    "unlikely to be recommended via content-based similarity."
                 )
             )
 
