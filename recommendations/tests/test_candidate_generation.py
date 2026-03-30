@@ -15,7 +15,7 @@ Test classes:
 from django.test import TestCase
 from unittest.mock import patch
 
-from recommendations.domain.engines.candidate_gen import CandidateGenerator
+from recommendations.domain.engines.candidate_generation import CandidateGenerator
 from recommendations.domain.schemas import EngineConfig
 
 
