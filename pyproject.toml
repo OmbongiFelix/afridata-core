@@ -24,3 +24,8 @@ dependencies = [
     "sqlalchemy>=2.0.48",
     "xlrd>=2.0.2",
 ]
+
+[dependency-groups]
+dev = [
+    "factory-boy>=3.3.3",
+]
