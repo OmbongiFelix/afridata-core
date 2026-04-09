@@ -106,6 +106,8 @@ class UserInteraction(models.Model):
 
     created_at = models.DateTimeField(default=timezone.now, db_index=True)
 
+    timestamp = models.DateTimeField(auto_now_add=True) # added after admin.py raised issue of it not existing in models
+
     class Meta:
         app_label = "recommendations"
         ordering = ["-created_at"]
@@ -203,6 +205,7 @@ class DatasetProxy(models.Model):
 
     last_synced_at = models.DateTimeField(auto_now=True)
     created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at    = models.DateTimeField(auto_now=True)      # added after admin.py raised issue of it not existing in models
 
     class Meta:
         app_label = "recommendations"
