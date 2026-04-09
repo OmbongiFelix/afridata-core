@@ -16,6 +16,7 @@ responses are parsed from strict JSON.  Three backends are supported:
     - OpenAI    (gpt-4o-mini by default)
     - Anthropic (claude-haiku-4-5-20251001 by default)
     - Ollama    (llama3 by default, local inference)
+    - Gemini     (gemini-1.5-pro by default)
 
 --------------------------------------------------------------------
 CONFIGURATION — Django settings (settings.py)
@@ -24,7 +25,7 @@ CONFIGURATION — Django settings (settings.py)
     # ----------------------------------------------------------------
     # ⚠️  REQUIRED — choose one backend
     # ----------------------------------------------------------------
-    LLM_BACKEND = "openai"          # "openai" | "anthropic" | "ollama"
+    LLM_BACKEND = "openai"          # "gemini" |"openai" | "anthropic" | "ollama"
 
     # ----------------------------------------------------------------
     # ⚠️  API KEYS — set the key for whichever backend you choose.
@@ -377,6 +378,51 @@ class _LLMBackend(ABC):
         """
 
 
+
+class _GeminiBackend(_LLMBackend):
+    """
+    Google Gemini backend (Google GenAI SDK).
+
+    ⚠️  Requires:
+        pip install google-genai>=1.0.0
+
+    ⚠️  API key:
+        Set GEMINI_API_KEY in Django settings (loaded from os.environ).
+        Obtain at: https://aistudio.google.com/app/apikey
+    """
+
+    def __init__(self, api_key: str, **kwargs):
+        super().__init__(**kwargs)
+        # ⚠️  API KEY — passed in from Django settings; never hard-code here.
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise LLMConfigError(
+                "Gemini backend requires the 'google-genai' package. "
+                "Install it with: pip install google-genai>=1.0.0"
+            ) from exc
+        self._types = types
+        self._client = genai.Client(api_key=api_key)
+
+    def complete(self, system_prompt: str, user_prompt: str) -> str:
+        try:
+            response = self._client.models.generate_content(
+                model=self.model,
+                contents=user_prompt,
+                config=self._types.GenerateContentConfig(
+                    system_instruction=system_prompt,
+                    max_output_tokens=self.max_tokens,
+                    temperature=self.temperature,
+                    response_mime_type="application/json",  # enforces JSON mode
+                ),
+            )
+            return response.text or ""
+        except Exception as exc:
+            raise LLMRequestError(f"Gemini API request failed: {exc}") from exc
+
+
+
 class _OpenAIBackend(_LLMBackend):
     """
     OpenAI ChatCompletion backend.
@@ -545,6 +591,7 @@ def _build_backend(
     """
     name = backend_name.lower()
     common = dict(model=model, max_tokens=max_tokens, temperature=temperature, timeout=timeout)
+    
 
     if name == "openai":
         # ⚠️  REQUIRES: OPENAI_API_KEY in Django settings
@@ -560,10 +607,15 @@ def _build_backend(
         # No API key — but OLLAMA_BASE_URL must point to your Ollama server.
         base_url = _setting("OLLAMA_BASE_URL", default="http://localhost:11434")
         return _OllamaBackend(base_url=base_url, **common)
+    
+    if name == "gemini":
+        # ⚠️  REQUIRES: GEMINI_API_KEY in Django settings
+        api_key = _setting("GEMINI_API_KEY")
+        return _GeminiBackend(api_key=api_key, **common)
 
     raise LLMConfigError(
         f"Unknown LLM_BACKEND '{backend_name}'. "
-        f"Supported values: 'openai', 'anthropic', 'ollama'."
+        f"Supported values: 'openai', 'anthropic', 'ollama', 'gemini'."
     )
 
 
@@ -841,4 +893,5 @@ def _default_model(backend: str) -> str:
         "openai":    "gpt-4o-mini",
         "anthropic": "claude-haiku-4-5-20251001",
         "ollama":    "llama3",
+        "gemini":    "gemini-1.5-pro",
     }.get(backend.lower(), "gpt-4o-mini")
