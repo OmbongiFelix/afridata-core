@@ -141,6 +141,9 @@ thumbnails/
 *.avi
 *.mov
 
+#from google-genai>=1.0.0
+
+*=*
 
 # ── Cloud & Infrastructure ────────────────────────────────────
 # AWS
