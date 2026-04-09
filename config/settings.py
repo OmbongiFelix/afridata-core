@@ -146,10 +146,14 @@ STATIC_URL = 'static/'
 
 
 
-LLM_BACKEND = "openai" # ⚠ required — selects the backend
-LLM_MODEL = "gpt-4o-mini" # or "gpt-4o", "gpt-3.5-turbo"
+
+
+LLM_BACKEND = os.getenv("LLM_BACKEND")  # ⚠ required — selects the backend
+LLM_MODEL = os.getenv("LLM_MODEL")  # or "gpt-4o", "gpt-3.5-turbo"
 
 # Get your key → https://platform.openai.com/api-keys
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 # Optional tuning 
