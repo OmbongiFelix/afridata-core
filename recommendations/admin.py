@@ -6,14 +6,14 @@ and recommendation outputs without needing direct database access.
 
 Registered models:
   UserInteraction      — list by user, interaction_type, timestamp
-  Dataset              — list by title, category, updated_at
+  DatasetProxy              — list by title, category, updated_at
   RecommendationResult — list by user, generated_at; show alpha and item count
 """
 
 
 
 from django.contrib import admin
-from .models import UserInteraction, Dataset, RecommendationResult
+from .models import UserInteraction, DatasetProxy, RecommendationResult
 
 
 @admin.register(UserInteraction)
@@ -24,7 +24,7 @@ class UserInteractionAdmin(admin.ModelAdmin):
     readonly_fields = ("user", "interaction_type", "timestamp")
 
 
-@admin.register(Dataset)
+@admin.register(DatasetProxy)
 class DatasetAdmin(admin.ModelAdmin):
     list_display = ("title", "category", "updated_at")
     list_filter = ("category",)
