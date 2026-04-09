@@ -26,8 +26,8 @@ import numpy as np
 import scipy.sparse
 from sklearn.preprocessing import normalize
 
-from infrastructure.persistence import get_user_interactions
-from infrastructure.vector_store import VectorStoreError, load_tfidf_matrix
+from recommendations.infrastructure.persistence import get_user_interactions
+from recommendations.infrastructure.vector_store import VectorStoreError, load_tfidf_matrix
 from recommendations.domain.schemas import CandidateSet
 
 if TYPE_CHECKING:
