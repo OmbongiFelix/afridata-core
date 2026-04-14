@@ -145,6 +145,19 @@ thumbnails/
 
 *=*
 
+
+# Postman sensitive or local files
+postman/*.postman_environment.json
+postman/*-local.json
+postman/cache/
+postman/tmp/
+
+
+
+
+
+
+
 # ── Cloud & Infrastructure ────────────────────────────────────
 # AWS
 .aws/
