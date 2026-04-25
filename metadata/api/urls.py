@@ -11,3 +11,15 @@ Route map:
     runs/<int:pk>/         → PipelineRunDetailView
     runs/<int:pk>/schema/  → MetadataSchemaView
 """
+
+from django.urls import path
+
+from .views import MetadataSchemaView, PipelineRunDetailView, PipelineRunListCreateView
+
+app_name = "metadata"
+
+urlpatterns = [
+    path("runs/", PipelineRunListCreateView.as_view(), name="run-list-create"),
+    path("runs/<int:pk>/", PipelineRunDetailView.as_view(), name="run-detail"),
+    path("runs/<int:pk>/schema/", MetadataSchemaView.as_view(), name="run-schema"),
+]
