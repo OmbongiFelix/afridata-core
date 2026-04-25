@@ -151,6 +151,8 @@ postman/*.postman_environment.json
 postman/*-local.json
 postman/cache/
 postman/tmp/
+.postman/
+postman/
 
 
 
