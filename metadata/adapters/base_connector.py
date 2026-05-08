@@ -19,6 +19,21 @@ from sqlalchemy.engine import Engine
 import logging
 import os
 
+
+# I want to replace os.environ.get() with os.getenv()
+from pathlib import Path
+from dotenv import load_dotenv
+# Build paths inside the project like this: BASE_DIR / 'subdir'.
+BASE_DIR = Path(__file__).resolve().parent.parent
+
+#load .env
+load_dotenv(BASE_DIR / ".env")
+
+
+
+
+
+
 logger = logging.getLogger(__name__)
 
 # Files with a metadata score at or above this threshold are skipped.
@@ -67,7 +82,8 @@ class BaseConnector(ABC):
         if self._engine is not None:
             return self._engine
 
-        connection_string = os.environ.get("DB_CONNECTION_STRING")
+        #connection_string = os.environ.get("DB_CONNECTION_STRING")
+        connection_string = os.getenv("DB_CONNECTION_STRING")
         if not connection_string:
             raise EnvironmentError(
                 "DB_CONNECTION_STRING environment variable is not set. "
