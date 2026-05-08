@@ -1,4 +1,5 @@
 """
+--> For External db Data Sources
 Schema metadata extractor for SQL/database sources.
 
 Uses SQLAlchemy's Inspector to query the database information schema
