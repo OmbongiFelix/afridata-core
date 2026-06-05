@@ -26,10 +26,9 @@ Strategy
    generic type derived from the column's pandas dtype.
 
 The classifier is *self-contained*: it ships with synthetic training data
-so it can run without an external model artefact.  In production you would
-replace ``_build_training_data()`` with a call that loads a pre-trained
-``joblib`` model from disk.
-
+so it can run without an external model artefact.  In production ``_build_training_data()`` 
+will be replaced with a call that loads a pre-trained ``joblib`` model from disk.
+ 
 Usage
 -----
     from profiler import DataFrameProfiler
@@ -50,6 +49,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -341,35 +341,88 @@ class SemanticClassifier:
 
     Pipeline
     --------
-    1. Rule-based fast path using column name token matching and extractor
-       flags.  High-confidence; short-circuits ML when triggered.
-    2. ML classifier (``SGDClassifier``, log loss) trained on a synthetic
-       feature set derived from the augmented profile.
-    3. Confidence fallback: when ML confidence < ``ML_CONFIDENCE_THRESHOLD``
-       the label is derived from the pandas dtype instead.
+    1. **Rule-based fast path** — always runs first.  High-confidence
+       heuristics from column-name tokens, SQL metadata, and extractor flags.
+       Returns with ``confidence=1.0`` when a rule fires; short-circuits all
+       subsequent stages.
+
+    2. **ML classifier** — runs only when a ``.joblib`` model is successfully
+       loaded *and* no rule fired.  Skipped entirely when the model file is
+       absent or fails to load (rule-based-only mode).
+
+    3. **Dtype-derived fallback** — used when ML confidence is below
+       ``ML_CONFIDENCE_THRESHOLD``, or when no model is available.
+
+    If the model file is missing the classifier degrades gracefully:
+    a warning is logged and stages 1 + 3 continue to operate normally.
+    Use ``classifier.model_loaded`` to check which mode is active.
 
     After ``classify()`` each profile dict gains two new keys:
 
         semantic_type        (str)   — one of ``SEMANTIC_TYPES``
-        semantic_confidence  (float) — probability in [0, 1]; 1.0 for rules
+        semantic_confidence  (float) — probability in [0, 1]; 1.0 for rules,
+                                       0.0 when dtype fallback is used without
+                                       a model.
 
     Usage
     -----
         classifier = SemanticClassifier()
         classified = classifier.classify(augmented_profiles)
     """
+    MODEL_PATH = Path(__file__).parent / "artifacts" / "semantic_classifier.joblib"
 
-    def __init__(self, confidence_threshold: float = ML_CONFIDENCE_THRESHOLD):
+    def __init__(self, confidence_threshold: float = ML_CONFIDENCE_THRESHOLD, model_path=MODEL_PATH):
         """
         Args:
             confidence_threshold:
                 ML probability below which the dtype-derived fallback label
                 is used instead of the model's top prediction.
+            model_path:
+                Path to a pre-trained joblib model artefact.  If the file does
+                not exist or fails to load, the classifier operates in
+                **rule-based-only mode**: rules → dtype fallback.  No exception
+                is raised; a warning is logged instead.
         """
         self.confidence_threshold = confidence_threshold
         self.logger = logging.getLogger(self.__class__.__name__)
         self._feature_extractor = _FeatureExtractor()
-        self._model = self._train()
+        # Bug fix: was assigned to self.model (no underscore), but _apply_ml
+        # and _classify_column both reference self._model.  Unified to _model.
+        self._model = self._load(model_path)
+
+    @staticmethod
+    def _load(path):
+        """
+        Attempt to load a pre-trained joblib model from *path*.
+
+        Returns the fitted pipeline on success, or ``None`` if the file is
+        absent or cannot be loaded.  A ``None`` return puts the classifier
+        into rule-based-only mode — no exception is propagated.
+        """
+        try:
+            import joblib
+            model = joblib.load(path)
+            logger.info("SemanticClassifier: loaded model from %s", path)
+            return model
+        except FileNotFoundError:
+            logger.warning(
+                "SemanticClassifier: model file not found at '%s'. "
+                "Running in rule-based-only mode (rules → dtype fallback).",
+                path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "SemanticClassifier: could not load model from '%s' (%s: %s). "
+                "Running in rule-based-only mode (rules → dtype fallback).",
+                path, type(exc).__name__, exc,
+            )
+        return None
+
+    @property
+    def model_loaded(self) -> bool:
+        """``True`` when a trained ML model is available, ``False`` otherwise."""
+        return self._model is not None
+
 
     # ------------------------------------------------------------------
     # Public interface
@@ -392,7 +445,10 @@ class SemanticClassifier:
             ``semantic_confidence`` injected per column.
         """
         self.logger.info(
-            "SemanticClassifier.classify: classifying %d column(s).", len(profiles)
+            "SemanticClassifier.classify: classifying %d column(s) "
+            "[mode: %s].",
+            len(profiles),
+            "rule-based + ML" if self._model is not None else "rule-based only",
         )
 
         for col, profile in profiles.items():
@@ -426,25 +482,40 @@ class SemanticClassifier:
         """
         Classify a single column, returning (semantic_type, confidence).
 
-        Applies the three-stage pipeline: rules → ML → dtype fallback.
+        Pipeline:
+            1. Rule-based fast path (always runs first).
+            2. ML classifier — only when a model is loaded AND a rule did not
+               fire.  Skipped entirely if ``self._model is None``.
+            3. Dtype-derived fallback — used when ML confidence is below the
+               threshold, or when no model is available.
         """
-        # Stage 1: rule-based fast path
+        # Stage 1: rule-based fast path (always first)
         rule_type = self._apply_rules(col, profile)
         if rule_type is not None:
             return rule_type, 1.0
 
-        # Stage 2: ML classifier
-        ml_type, ml_conf = self._apply_ml(profile)
-        if ml_conf >= self.confidence_threshold:
-            return ml_type, ml_conf
+        # Stage 2: ML classifier (only when a model is present)
+        if self._model is not None:
+            ml_type, ml_conf = self._apply_ml(profile)
+            if ml_conf >= self.confidence_threshold:
+                return ml_type, ml_conf
+            # ML fired but confidence too low → dtype fallback
+            fallback = self._dtype_fallback(profile)
+            self.logger.debug(
+                "Column '%s': ML confidence %.2f below threshold — "
+                "using dtype fallback '%s'.",
+                col, ml_conf, fallback,
+            )
+            return fallback, ml_conf  # surface the actual (low) confidence
 
-        # Stage 3: dtype-derived fallback
+        # Stage 3: no model available — dtype fallback
         fallback = self._dtype_fallback(profile)
         self.logger.debug(
-            "Column '%s': ML confidence %.2f below threshold — using dtype fallback '%s'.",
-            col, ml_conf, fallback,
+            "Column '%s': no ML model — using dtype fallback '%s'.",
+            col, fallback,
         )
-        return fallback, ml_conf  # surface the actual (low) confidence
+        return fallback, 0.0
+
 
     def _apply_rules(self, col: str, profile: dict[str, Any]) -> str | None:
         """
