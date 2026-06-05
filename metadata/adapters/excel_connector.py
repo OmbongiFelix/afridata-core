@@ -45,7 +45,7 @@ class ExcelConnector(BaseConnector):
                         each file and concatenates everything into one DataFrame.
     """
 
-    SUPPORTED_EXTENSIONS = [".xlsx", ".xls"]
+    SUPPORTED_EXTENSIONS = [".excel"]
 
     def __init__(self):
         super().__init__()
