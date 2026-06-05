@@ -23,12 +23,12 @@ CONFIGURATION — Django settings (settings.py)
 --------------------------------------------------------------------
 
     # ----------------------------------------------------------------
-    # ⚠️  REQUIRED — choose one backend
+    #    REQUIRED — choose one backend
     # ----------------------------------------------------------------
     LLM_BACKEND = "openai"          # "gemini" |"openai" | "anthropic" | "ollama"
 
     # ----------------------------------------------------------------
-    # ⚠️  API KEYS — set the key for whichever backend you choose.
+    #    API KEYS — set the key for whichever backend you choose.
     #     Never hard-code secrets here; use environment variables or
     #     a secrets manager and reference them like so:
     # ----------------------------------------------------------------
@@ -36,17 +36,22 @@ CONFIGURATION — Django settings (settings.py)
 
     # OpenAI
     # Get your key at https://platform.openai.com/api-keys
-    OPENAI_API_KEY    = os.environ["OPENAI_API_KEY"]          # ⚠️ REQUIRED for openai backend
+    OPENAI_API_KEY    = os.environ["OPENAI_API_KEY"]          #   REQUIRED for openai backend
     LLM_MODEL         = "gpt-4o-mini"                          # or "gpt-4o", "gpt-3.5-turbo"
 
     # Anthropic
     # Get your key at https://console.anthropic.com/settings/keys
-    ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]       # ⚠️ REQUIRED for anthropic backend
+    ANTHROPIC_API_KEY = os.environ["ANTHROPIC_API_KEY"]       #   REQUIRED for anthropic backend
     LLM_MODEL         = "claude-haiku-4-5-20251001"            # or "claude-sonnet-4-6"
 
     # Ollama (local — no API key needed)
     OLLAMA_BASE_URL   = "http://localhost:11434"               # default Ollama address
     LLM_MODEL         = "llama3"                               # any model pulled via `ollama pull`
+
+    # Gemini
+    # Get your key at https://aistudio.google.com/app/apikey
+    GEMINI_API_KEY    = os.environ["GEMINI_API_KEY"]          #   REQUIRED for gemini backend
+    LLM_MODEL         = "gemini-1.5-pro"                       # or "gemini-1.5-flash"
 
     # ----------------------------------------------------------------
     # Optional tuning
@@ -383,17 +388,17 @@ class _GeminiBackend(_LLMBackend):
     """
     Google Gemini backend (Google GenAI SDK).
 
-    ⚠️  Requires:
+       Requires:
         pip install google-genai>=1.0.0
 
-    ⚠️  API key:
+       API key:
         Set GEMINI_API_KEY in Django settings (loaded from os.environ).
         Obtain at: https://aistudio.google.com/app/apikey
     """
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
-        # ⚠️  API KEY — passed in from Django settings; never hard-code here.
+        #    API KEY — passed in from Django settings; never hard-code here.
         try:
             from google import genai
             from google.genai import types
@@ -427,17 +432,17 @@ class _OpenAIBackend(_LLMBackend):
     """
     OpenAI ChatCompletion backend.
 
-    ⚠️  Requires:
+       Requires:
         pip install openai>=1.0.0
 
-    ⚠️  API key:
+       API key:
         Set OPENAI_API_KEY in Django settings (loaded from os.environ).
         Obtain at: https://platform.openai.com/api-keys
     """
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
-        # ⚠️  API KEY — passed in from Django settings; never hard-code here.
+        #    API KEY — passed in from Django settings; never hard-code here.
         try:
             from openai import OpenAI
         except ImportError as exc:
@@ -468,17 +473,17 @@ class _AnthropicBackend(_LLMBackend):
     """
     Anthropic Messages API backend.
 
-    ⚠️  Requires:
+       Requires:
         pip install anthropic>=0.25.0
 
-    ⚠️  API key:
+       API key:
         Set ANTHROPIC_API_KEY in Django settings (loaded from os.environ).
         Obtain at: https://console.anthropic.com/settings/keys
     """
 
     def __init__(self, api_key: str, **kwargs):
         super().__init__(**kwargs)
-        # ⚠️  API KEY — passed in from Django settings; never hard-code here.
+        #    API KEY — passed in from Django settings; never hard-code here.
         try:
             import anthropic as anthropic_sdk
         except ImportError as exc:
@@ -514,18 +519,18 @@ class _OllamaBackend(_LLMBackend):
     """
     Ollama local-inference backend (HTTP REST API).
 
-    ⚠️  Requires:
+       Requires:
         - Ollama running locally: https://ollama.com/download
         - Target model pulled:    ollama pull llama3
         - No API key needed for local inference.
 
-    ⚠️  Set OLLAMA_BASE_URL in Django settings if Ollama is not on
+       Set OLLAMA_BASE_URL in Django settings if Ollama is not on
         localhost:11434 (e.g. a remote GPU server).
     """
 
     def __init__(self, base_url: str, **kwargs):
         super().__init__(**kwargs)
-        # ⚠️  BASE URL — set OLLAMA_BASE_URL in Django settings.
+        #    BASE URL — set OLLAMA_BASE_URL in Django settings.
         self._base_url = base_url.rstrip("/")
         try:
             import httpx
@@ -577,7 +582,7 @@ def _build_backend(
     Instantiate the correct ``_LLMBackend`` subclass from Django settings.
 
     Args:
-        backend_name: ``"openai"``, ``"anthropic"``, or ``"ollama"``.
+        backend_name: ``"gemini"``, ``"openai"``, ``"anthropic"``, or ``"ollama"``.
         model:        Model identifier string.
         max_tokens:   Maximum tokens for LLM response.
         temperature:  Sampling temperature.
@@ -594,12 +599,12 @@ def _build_backend(
     
 
     if name == "openai":
-        # ⚠️  REQUIRES: OPENAI_API_KEY in Django settings
+        #    REQUIRES: OPENAI_API_KEY in Django settings
         api_key = _setting("OPENAI_API_KEY")
         return _OpenAIBackend(api_key=api_key, **common)
 
     if name == "anthropic":
-        # ⚠️  REQUIRES: ANTHROPIC_API_KEY in Django settings
+        #    REQUIRES: ANTHROPIC_API_KEY in Django settings
         api_key = _setting("ANTHROPIC_API_KEY")
         return _AnthropicBackend(api_key=api_key, **common)
 
@@ -609,7 +614,7 @@ def _build_backend(
         return _OllamaBackend(base_url=base_url, **common)
     
     if name == "gemini":
-        # ⚠️  REQUIRES: GEMINI_API_KEY in Django settings
+        #    REQUIRES: GEMINI_API_KEY in Django settings
         api_key = _setting("GEMINI_API_KEY")
         return _GeminiBackend(api_key=api_key, **common)
 
@@ -688,7 +693,7 @@ class LLMGenerator:
     Profiles are grouped into batches before being sent to the LLM to
     minimise the number of API round-trips.
 
-    ⚠️  CONFIGURATION — see module docstring for full settings reference.
+       CONFIGURATION — see module docstring for full settings reference.
     The minimum required settings are:
         LLM_BACKEND  and the corresponding API key setting.
 
@@ -700,8 +705,8 @@ class LLMGenerator:
 
     def __init__(self):
         # --- Read settings with documented defaults ---
-        backend_name = _setting("LLM_BACKEND")                           # ⚠️ REQUIRED
-        model        = _setting("LLM_MODEL",          default=_default_model(backend_name if isinstance(backend_name, str) else "openai"))
+        backend_name = _setting("LLM_BACKEND")                           #   REQUIRED
+        model        = _setting("LLM_MODEL",          default=_default_model(backend_name if isinstance(backend_name, str) else "gemini"))
         max_tokens   = int(_setting("LLM_MAX_TOKENS",      default=_DEFAULT_MAX_TOKENS))
         temperature  = float(_setting("LLM_TEMPERATURE",   default=_DEFAULT_TEMPERATURE))
         timeout      = int(_setting("LLM_REQUEST_TIMEOUT", default=_DEFAULT_TIMEOUT))
