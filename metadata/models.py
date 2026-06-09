@@ -17,6 +17,8 @@ import uuid
 
 from django.db import models
 
+from config import settings
+
 
 # ---------------------------------------------------------------------------
 # Enumerations
@@ -102,6 +104,15 @@ class PipelineRun(models.Model):
         null=True,
         blank=True,
         help_text="Per-stage timing dict keyed by stage name.",
+    )
+    
+    # 
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="pipeline_runs",
     )
 
     # --- Timestamps --------------------------------------------------------

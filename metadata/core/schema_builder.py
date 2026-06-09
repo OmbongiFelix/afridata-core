@@ -1,3 +1,4 @@
+#metadata/core/schema_builder.py
 """
 JSON Schema builder — final stage of the Metadata Extraction Pipeline.
 
@@ -49,7 +50,7 @@ JSON_SCHEMA_DRAFT = "http://json-schema.org/draft-07/schema#"
 # Types not listed here fall back to _dtype_to_json_type().
 # ---------------------------------------------------------------------------
 _SEMANTIC_TYPE_MAP: dict[str, str] = {
-    "id":          "string",
+    #"id":          "string",
     "name":        "string",
     "email":       "string",
     "phone":       "string",

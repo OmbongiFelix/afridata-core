@@ -76,13 +76,14 @@ def _load_source(name: str, filepath: str):
     spec.loader.exec_module(mod)
     return mod
 
-_HERE = Path("/mnt/user-data/uploads")
+_ADAPTERS = Path(__file__).resolve().parent.parent / "adapters"
+_EXTRACTORS = Path(__file__).resolve().parent.parent / "core" / "extractors"
 
-_csv_mod   = _load_source("adapters.csv_connector",        _HERE / "csv_connector.py")
-_excel_mod = _load_source("adapters.excel_connector",      _HERE / "excel_connector.py")
-_sql_mod   = _load_source("adapters.sql_connector",        _HERE / "sql_connector.py")
-_cex_mod   = _load_source("adapters.csv_excel_extractor",  _HERE / "csv_excel_extractor.py")
-_sqlex_mod = _load_source("adapters.sql_extractor",        _HERE / "sql_extractor.py")
+_csv_mod   = _load_source("adapters.csv_connector",        _ADAPTERS   / "csv_connector.py")
+_excel_mod = _load_source("adapters.excel_connector",      _ADAPTERS   / "excel_connector.py")
+_sql_mod   = _load_source("adapters.sql_connector",        _ADAPTERS   / "sql_connector.py")
+_cex_mod   = _load_source("adapters.csv_excel_extractor",  _EXTRACTORS / "csv_excel_extractor.py")
+_sqlex_mod = _load_source("adapters.sql_extractor",        _EXTRACTORS / "sql_extractor.py")
 
 CSVConnector        = _csv_mod.CSVConnector
 ExcelConnector      = _excel_mod.ExcelConnector

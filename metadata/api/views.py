@@ -25,11 +25,17 @@ from celery import Task
 from rest_framework import generics, mixins, status
 from rest_framework import request
 from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.pagination import PageNumberPagination
+from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
+from django.core.exceptions import ValidationError
+from django.http import Http404
 from rest_framework.serializers import BaseSerializer
 from rest_framework.views import APIView
 from rest_framework.serializers import Serializer
+
+from .permissions import IsPipelineAdmin, IsOwnerOrAdmin, IsResultViewer
 
 from metadata.models import ColumnProfile, MetadataResult, PipelineRun, RunStatus
 from .serializers import (
@@ -59,11 +65,10 @@ def _get_run_or_404(pk: str) -> PipelineRun:
     """Return a PipelineRun by pk or raise DRF NotFound."""
     try:
         return PipelineRun.objects.get(pk=pk)
-    except (PipelineRun.DoesNotExist, ValueError):
+    except (PipelineRun.DoesNotExist, ValueError, ValidationError):
         raise NotFound(detail=f"PipelineRun '{pk}' not found.")
+    
 
-
-# ---------------------------------------------------------------------------
 # POST /api/runs/   — trigger a new pipeline run
 # GET  /api/runs/   — list all pipeline runs
 # ---------------------------------------------------------------------------
@@ -98,7 +103,18 @@ class PipelineRunListCreateView(
         }
     """
 
-    queryset = PipelineRun.objects.all()
+    queryset         = PipelineRun.objects.all().order_by("-created_at")
+    pagination_class = PageNumberPagination
+
+    def get_permissions(self) -> list[BasePermission]:
+        """
+        POST  — pipeline admins only (can trigger runs).
+        GET   — admins or read-only viewers (any authenticated user with a role).
+        """
+        if self.request.method == "POST":
+            return [IsPipelineAdmin()]
+        # For GET, accept either role; IsResultViewer already enforces SAFE_METHODS.
+        return [IsResultViewer()]
 
     def get_serializer_class(self) -> Type[BaseSerializer]: # type: ignore[override]
         if self.request.method == "POST":
@@ -131,6 +147,7 @@ class PipelineRunListCreateView(
             dataset_title       = data.get("dataset_title", ""),
             dataset_description = data.get("dataset_description", ""),
             status              = RunStatus.PENDING,
+            created_by          = request.user,  # required for IsOwnerOrAdmin checks
         )
         logger.info(
             "Created PipelineRun %s [source=%s, path=%s].",
@@ -139,6 +156,8 @@ class PipelineRunListCreateView(
         
         run_pipeline_task: Task = _run_pipeline_task  # type: ignore[assignment]
         # --- Dispatch Celery task ------------------------------------------
+        # In tests, set CELERY_TASK_ALWAYS_EAGER = True so .delay() runs
+        # synchronously without needing a running broker.
         run_pipeline_task.delay(
             run_id              = str(run.id),
             source              = run.source,
@@ -176,11 +195,15 @@ class PipelineRunDetailView(
         created_at, started_at, finished_at.
     """
 
-    queryset         = PipelineRun.objects.all()
-    serializer_class = PipelineRunSerializer
+    queryset            = PipelineRun.objects.all()
+    serializer_class    = PipelineRunSerializer
+    permission_classes  = [IsOwnerOrAdmin]
 
     def get(self, request: Request, pk: str, *args, **kwargs) -> Response:
-        run = _get_run_or_404(pk)
+        # get_object() calls check_object_permissions(), which triggers
+        # IsOwnerOrAdmin.has_object_permission(). Using _get_run_or_404()
+        # directly would bypass that check entirely.
+        run = self.get_object()
         serializer = self.get_serializer(run)
         return Response(serializer.data)
 
@@ -208,8 +231,14 @@ class PipelineRunSchemaView(APIView):
         }
     """
 
+    permission_classes = [IsOwnerOrAdmin]
+
     def get(self, request: Request, pk: str, *args, **kwargs) -> Response:
         run = _get_run_or_404(pk)
+
+        # APIView has no get_object(), so trigger the object-level permission
+        # check manually — this is the standard DRF pattern for APIView subclasses.
+        self.check_object_permissions(request, run)
 
         if run.status != RunStatus.SUCCESS:
             return Response(
@@ -275,11 +304,16 @@ class PipelineRunColumnProfilesView(
         ]
     """
 
-    serializer_class = ColumnProfileSerializer
+    serializer_class    = ColumnProfileSerializer
+    permission_classes  = [IsOwnerOrAdmin]
 
     def get_queryset(self) -> QuerySet[ColumnProfile]:  # type: ignore[override]
         pk  = self.kwargs["pk"]
         run = _get_run_or_404(pk)
+
+        # get_queryset() runs before DRF's automatic object-permission machinery,
+        # so trigger the check explicitly here — same pattern as PipelineRunSchemaView.
+        self.check_object_permissions(self.request, run)
 
         if run.status != RunStatus.SUCCESS:
             raise ValidationError(

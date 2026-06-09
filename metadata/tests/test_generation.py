@@ -91,7 +91,7 @@ class TestLLMGenerator(unittest.TestCase):
     # ------------------------------------------------------------------ #
 
     def setUp(self):
-        from core.enhancement import llm_generator as mod
+        from metadata.core.enhancement import llm_generator as mod
         self.mod = mod
 
     # ------------------------------------------------------------------ #
@@ -293,7 +293,7 @@ class TestLLMGenerator(unittest.TestCase):
 
     def _make_generator(self, backend_return: str = "{}") -> "LLMGenerator":
         """Build an LLMGenerator with a mock backend."""
-        from core.enhancement.llm_generator import LLMGenerator
+        from metadata.core.enhancement.llm_generator import LLMGenerator
         gen = object.__new__(LLMGenerator)
         gen.batch_size = 10
         gen.max_retries = 1
@@ -321,7 +321,7 @@ class TestLLMGenerator(unittest.TestCase):
         self.assertIn("business_name", result["email"])
 
     def test_enrich_applies_safe_defaults_on_request_error(self):
-        from core.enhancement.llm_generator import LLMGenerator, LLMRequestError
+        from metadata.core.enhancement.llm_generator import LLMGenerator, LLMRequestError
         gen = self._make_generator()
         gen._backend.complete.side_effect = LLMRequestError("boom")
         profiles = {"col": {"dtype": "object"}}
@@ -360,7 +360,7 @@ class TestLLMGenerator(unittest.TestCase):
     # ------------------------------------------------------------------ #
 
     def test_enrichment_report_counts_enriched(self):
-        from core.enhancement.llm_generator import LLMGenerator
+        from metadata.core.enhancement.llm_generator import LLMGenerator
         gen = object.__new__(LLMGenerator)
         gen.logger = MagicMock()
         profiles = {
@@ -373,7 +373,7 @@ class TestLLMGenerator(unittest.TestCase):
         self.assertIn("b", report["unenriched_columns"])
 
     def test_enrichment_report_tag_frequency(self):
-        from core.enhancement.llm_generator import LLMGenerator
+        from metadata.core.enhancement.llm_generator import LLMGenerator
         gen = object.__new__(LLMGenerator)
         gen.logger = MagicMock()
         profiles = {
@@ -385,7 +385,7 @@ class TestLLMGenerator(unittest.TestCase):
         self.assertEqual(report["tag_frequency"]["financial"], 1)
 
     def test_enrichment_report_empty_profiles(self):
-        from core.enhancement.llm_generator import LLMGenerator
+        from metadata.core.enhancement.llm_generator import LLMGenerator
         gen = object.__new__(LLMGenerator)
         gen.logger = MagicMock()
         report = gen.enrichment_report({})
@@ -411,7 +411,7 @@ class TestSchemaBuilder(unittest.TestCase):
     """Unit tests for core/schema_builder.py"""
 
     def setUp(self):
-        from core import schema_builder as mod
+        from metadata.core import schema_builder as mod
         self.mod = mod
         self.SchemaBuilder = mod.SchemaBuilder
 

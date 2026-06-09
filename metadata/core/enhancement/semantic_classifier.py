@@ -554,7 +554,10 @@ class SemanticClassifier:
             return "datetime"
 
         # --- Column-name token matching ---
-        name = str(col)
+        # Split on underscores/hyphens/spaces so that names like
+        # "user_email" or "birth_date" match word-boundary patterns
+        # (e.g. \bemail\b would not fire on "user_email" otherwise).
+        name = " ".join(re.split(r"[\s_\-]+", str(col).strip()))
         for pattern, sem_type in _NAME_RULES:
             if pattern.search(name):
                 return sem_type

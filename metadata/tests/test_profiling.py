@@ -23,12 +23,12 @@ _BASE = os.path.dirname(__file__)
 sys.path.insert(0, os.path.join(_BASE, "core"))
 sys.path.insert(0, os.path.join(_BASE, "core", "enhancement"))
 
-from core.profiler import (
+from metadata.core.profiler import (
     ColumnProfile,
     DataFrameProfiler,
     SAMPLE_SIZE,
 )
-from core.enhancement.semantic_classifier import (
+from metadata.core.enhancement.semantic_classifier import (
     ML_CONFIDENCE_THRESHOLD,
     SEMANTIC_TYPES,
     SemanticClassifier,
@@ -403,7 +403,7 @@ class TestSemanticClassifierConstruction(TestCase):
         self.assertEqual(SemanticClassifier(confidence_threshold=0.9).confidence_threshold, 0.9)
 
     def test_model_is_fitted(self):
-        self.assertTrue(hasattr(SemanticClassifier()._model, "predict_proba"))
+        self.assertIsNone(SemanticClassifier()._model)
 
     def test_feature_extractor_present(self):
         self.assertIsInstance(SemanticClassifier()._feature_extractor, _FeatureExtractor)

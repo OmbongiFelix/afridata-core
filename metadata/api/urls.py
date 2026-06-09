@@ -1,3 +1,4 @@
+#metadata/api/urls.py
 """
 URL configuration for the Metadata Extraction API.
 
@@ -14,12 +15,36 @@ Route map:
 
 from django.urls import path
 
-from .views import MetadataSchemaView, PipelineRunDetailView, PipelineRunListCreateView
+from .views import (
+    PipelineRunSchemaView as MetadataSchemaView, 
+    PipelineRunDetailView, 
+    PipelineRunListCreateView,
+    PipelineRunColumnProfilesView,
+)
 
 app_name = "metadata"
 
+
 urlpatterns = [
-    path("runs/", PipelineRunListCreateView.as_view(), name="run-list-create"),
-    path("runs/<int:pk>/", PipelineRunDetailView.as_view(), name="run-detail"),
-    path("runs/<int:pk>/schema/", MetadataSchemaView.as_view(), name="run-schema"),
+    path(
+        "runs/",
+        PipelineRunListCreateView.as_view(),
+        name="pipeline-run-list-create",
+    ),
+    path(
+        "runs/<uuid:pk>/",
+        PipelineRunDetailView.as_view(),
+        name="pipeline-run-detail",
+    ),
+    path(
+        "runs/<uuid:pk>/schema/",
+        MetadataSchemaView.as_view(),
+        name="pipeline-run-schema",
+    ),
+    path(
+        "runs/<uuid:pk>/columns/",
+        PipelineRunColumnProfilesView.as_view(),
+        name="pipeline-run-columns",
+    ),
 ]
+

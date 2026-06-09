@@ -22,7 +22,7 @@ from unittest.mock import MagicMock, patch
 
 from django.test import TestCase
 
-from core.pipeline import MetadataPipeline, PipelineResult
+from metadata.core.pipeline import MetadataPipeline, PipelineResult
 
 # ---------------------------------------------------------------------------
 # Fixture paths
@@ -79,7 +79,7 @@ class TestPipelineIntegration(TestCase):
 
     def _patch_llm(self):
         return patch(
-            "core.pipeline.LLMGenerator.enrich",
+            "metadata.core.pipeline.LLMGenerator.enrich",
             side_effect=_stub_enrich,
         )
 
@@ -323,7 +323,7 @@ class TestPipelineIntegration(TestCase):
     def test_llm_degraded_does_not_raise(self):
         """Generator returning profiles untouched must not break the pipeline."""
         with patch(
-            "core.pipeline.LLMGenerator.enrich",
+            "metadata.core.pipeline.LLMGenerator.enrich",
             side_effect=lambda p: p,
         ):
             result = MetadataPipeline(

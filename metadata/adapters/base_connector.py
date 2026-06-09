@@ -1,3 +1,4 @@
+#metadata/adapters/base_connector.py
 """
 Base connector interface for all data source adapters.
 

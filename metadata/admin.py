@@ -8,33 +8,13 @@ development and for ops teams.
 Registers: PipelineRun, MetadataResult
 
 PipelineRunAdmin features:
-    - list_display: id, source_type, status, created_by, started_at
-    - list_filter:  status, source_type
-    - search_fields: created_by__username
+    - list_display: id, source, status, started_at, elapsed_s
+    - list_filter:  status, source
     - readonly_fields: all (runs should not be edited via admin)
 """
 from django.contrib import admin
 
 from .models import MetadataResult, PipelineRun
-
-
-@admin.register(PipelineRun)
-class PipelineRunAdmin(admin.ModelAdmin):
-    list_display = ("id", "source_type", "status", "created_by", "started_at")
-    list_filter = ("status", "source_type")
-    search_fields = ("created_by__username",)
-
-    def get_readonly_fields(self, request, obj=None):
-        """Mark all fields as readonly — admin is for monitoring, not editing."""
-        if obj:
-            return [field.name for field in obj._meta.get_fields()]
-        return self.readonly_fields
-
-    def has_add_permission(self, request):
-        return False
-
-    def has_change_permission(self, request, obj=None):
-        return False
 
 
 class MetadataResultInline(admin.TabularInline):
@@ -52,21 +32,40 @@ class MetadataResultInline(admin.TabularInline):
         from django.utils.html import format_html
 
         try:
-            pretty = json.dumps(obj.schema, indent=2)
+            pretty = json.dumps(obj.schema_dict, indent=2)
             preview = pretty[:500] + ("..." if len(pretty) > 500 else "")
             return format_html("<pre style='white-space:pre-wrap'>{}</pre>", preview)
         except Exception:
-            return str(obj.schema)
+            return str(obj.schema_dict)
 
     schema_preview.short_description = "JSON Schema Preview"
 
 
+@admin.register(PipelineRun)
+class PipelineRunAdmin(admin.ModelAdmin):
+    list_display = ("id", "source", "status", "started_at", "elapsed_s")
+    list_filter = ("status", "source")
+    search_fields = ("id",)
+    inlines = [MetadataResultInline]
+
+    def get_readonly_fields(self, request, obj=None):
+        """Mark all fields as readonly — admin is for monitoring, not editing."""
+        if obj:
+            return [field.name for field in obj._meta.get_fields()]
+        return self.readonly_fields
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 @admin.register(MetadataResult)
 class MetadataResultAdmin(admin.ModelAdmin):
-    list_display = ("id", "pipeline_run", "created_at")
-    list_filter = ("pipeline_run__status", "pipeline_run__source_type")
-    search_fields = ("pipeline_run__created_by__username",)
-    inlines = [MetadataResultInline]
+    list_display = ("id", "run", "column_count", "created_at")
+    list_filter = ("run__status", "run__source")
+    search_fields = ("run__id",)
 
     def get_readonly_fields(self, request, obj=None):
         """Mark all fields as readonly — admin is for monitoring, not editing."""

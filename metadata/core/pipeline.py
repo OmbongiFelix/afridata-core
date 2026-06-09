@@ -46,12 +46,12 @@ from typing import Any
 
 import pandas as pd
 
-from profiler import DataFrameProfiler
-from extractors.csv_excel_extractor import CsvExcelExtractor
-from extractors.sql_extractor import SqlExtractor
-from enhancement.semantic_classifier import SemanticClassifier
-from  enhancement.llm_generator import LLMGenerator
-from schema_builder import SchemaBuilder
+from .profiler import DataFrameProfiler
+from metadata.core.extractors.csv_excel_extractor import CsvExcelExtractor
+from metadata.core.extractors.sql_extractor import SqlExtractor
+from metadata.core.enhancement.semantic_classifier import SemanticClassifier
+from  metadata.core.enhancement.llm_generator import LLMGenerator
+from metadata.core.schema_builder import SchemaBuilder
 
 logger = logging.getLogger(__name__)
 

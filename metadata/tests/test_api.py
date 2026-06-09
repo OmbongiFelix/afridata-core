@@ -365,16 +365,16 @@ class BaseAPITestCase(APITestCase):
 
     # URL helpers — adjust names to match your urls.py
     def run_list_url(self):
-        return reverse("pipeline-run-list-create")
+        return reverse("metadata:pipeline-run-list-create")
 
     def run_detail_url(self, pk):
-        return reverse("pipeline-run-detail", kwargs={"pk": str(pk)})
+        return reverse("metadata:pipeline-run-detail", kwargs={"pk": str(pk)})
 
     def run_schema_url(self, pk):
-        return reverse("pipeline-run-schema", kwargs={"pk": str(pk)})
+        return reverse("metadata:pipeline-run-schema", kwargs={"pk": str(pk)})
 
     def run_columns_url(self, pk):
-        return reverse("pipeline-run-columns", kwargs={"pk": str(pk)})
+        return reverse("metadata:pipeline-run-columns", kwargs={"pk": str(pk)})
 
 
 # ---------------------------------------------------------------------------
