@@ -348,8 +348,6 @@ class ColumnProfileSerializerTest(TestCase):
 class BaseAPITestCase(APITestCase):
     """
     Provides authenticated client, admin client, and shared URL helpers.
-    URL names assume urls.py registers views with the names below.
-    Adjust if your url conf uses different names.
     """
 
     def setUp(self):
@@ -363,7 +361,11 @@ class BaseAPITestCase(APITestCase):
         client.force_authenticate(user=user)
         return client
 
-    # URL helpers — adjust names to match your urls.py
+    def make_run(self, **kwargs) -> PipelineRun:
+        kwargs.setdefault("created_by", self.user)
+        return make_pipeline_run(**kwargs)
+
+    # URL helpers
     def run_list_url(self):
         return reverse("metadata:pipeline-run-list-create")
 
@@ -388,15 +390,15 @@ class PipelineRunListViewTest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_authenticated_user_can_list_runs(self):
-        make_pipeline_run()
-        make_pipeline_run()
+        self.make_run()
+        self.make_run()
         client = self.auth_as(self.user)
         response = client.get(self.run_list_url())
         self.assertEqual(response.status_code, status.HTTP_200_OK)
         self.assertGreaterEqual(len(response.data["results"]), 2)
 
     def test_list_returns_expected_fields(self):
-        make_pipeline_run()
+        self.make_run()
         client = self.auth_as(self.user)
         response = client.get(self.run_list_url())
         run = response.data["results"][0]
@@ -404,8 +406,8 @@ class PipelineRunListViewTest(BaseAPITestCase):
             self.assertIn(field, run)
 
     def test_list_orders_newest_first(self):
-        run1 = make_pipeline_run(source_path="first.csv")
-        run2 = make_pipeline_run(source_path="second.csv")
+        run1 = self.make_run(source_path="first.csv")
+        run2 = self.make_run(source_path="second.csv")
         client = self.auth_as(self.user)
         response = client.get(self.run_list_url())
         ids = [str(r["id"]) for r in response.data["results"]]
@@ -424,14 +426,14 @@ class PipelineRunCreateViewTest(BaseAPITestCase):
     @patch("metadata.api.views._run_pipeline_task")
     def test_valid_csv_post_returns_202(self, mock_task):
         mock_task.delay = MagicMock()
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         response = self._post(client, {"source": SourceType.CSV, "source_path": "data.csv"})
         self.assertEqual(response.status_code, status.HTTP_202_ACCEPTED)
 
     @patch("metadata.api.views._run_pipeline_task")
     def test_run_created_with_pending_status(self, mock_task):
         mock_task.delay = MagicMock()
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         self._post(client, {"source": SourceType.CSV, "source_path": "data.csv"})
         run = PipelineRun.objects.order_by("-created_at").first()
         self.assertEqual(run.status, RunStatus.PENDING)
@@ -439,30 +441,30 @@ class PipelineRunCreateViewTest(BaseAPITestCase):
     @patch("metadata.api.views._run_pipeline_task")
     def test_celery_task_is_dispatched(self, mock_task):
         mock_task.delay = MagicMock()
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         self._post(client, {"source": SourceType.CSV, "source_path": "data.csv"})
         mock_task.delay.assert_called_once()
 
     @patch("metadata.api.views._run_pipeline_task")
     def test_response_contains_run_id_and_status(self, mock_task):
         mock_task.delay = MagicMock()
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         response = self._post(client, {"source": SourceType.CSV, "source_path": "data.csv"})
         self.assertIn("id", response.data)
         self.assertEqual(response.data["status"], RunStatus.PENDING)
 
     def test_missing_source_path_returns_400(self):
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         response = self._post(client, {"source": SourceType.CSV})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_invalid_source_type_returns_400(self):
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         response = self._post(client, {"source": "parquet", "source_path": "x.parquet"})
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_sql_schema_with_csv_source_returns_400(self):
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         response = self._post(client, {
             "source": SourceType.CSV,
             "source_path": "data.csv",
@@ -473,7 +475,7 @@ class PipelineRunCreateViewTest(BaseAPITestCase):
     @patch("metadata.api.views._run_pipeline_task")
     def test_sql_post_dispatches_with_sql_extras(self, mock_task):
         mock_task.delay = MagicMock()
-        client = self.auth_as(self.user)
+        client = self.auth_as(self.admin)
         self._post(client, {
             "source": SourceType.SQL,
             "source_path": "orders",
@@ -496,7 +498,7 @@ class PipelineRunCreateViewTest(BaseAPITestCase):
 class PipelineRunDetailViewTest(BaseAPITestCase):
 
     def test_retrieve_existing_run_returns_200(self):
-        run = make_pipeline_run()
+        run = self.make_run()
         client = self.auth_as(self.user)
         response = client.get(self.run_detail_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_200_OK)
@@ -509,16 +511,18 @@ class PipelineRunDetailViewTest(BaseAPITestCase):
 
     def test_retrieve_invalid_pk_returns_404(self):
         client = self.auth_as(self.user)
-        response = client.get(self.run_detail_url("not-a-uuid"))
+        # Use a hardcoded URL path: Django's <uuid:pk> converter rejects
+        # non-UUID strings at URL resolution stage, returning 404 directly.
+        response = client.get("/api/metadata/runs/not-a-uuid/")
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_unauthenticated_request_returns_401(self):
-        run = make_pipeline_run()
+        run = self.make_run()
         response = self.client.get(self.run_detail_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_detail_includes_is_terminal_field(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         client = self.auth_as(self.user)
         response = client.get(self.run_detail_url(run.id))
         self.assertIn("is_terminal", response.data)
@@ -541,7 +545,7 @@ class PipelineRunSchemaViewTest(BaseAPITestCase):
         )
 
     def test_success_run_returns_200_with_schema(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         self._make_result(run)
         client = self.auth_as(self.user)
         response = client.get(self.run_schema_url(run.id))
@@ -550,20 +554,20 @@ class PipelineRunSchemaViewTest(BaseAPITestCase):
         self.assertEqual(str(response.data["run_id"]), str(run.id))
 
     def test_pending_run_returns_409(self):
-        run = make_pipeline_run(status=RunStatus.PENDING)
+        run = self.make_run(status=RunStatus.PENDING)
         client = self.auth_as(self.user)
         response = client.get(self.run_schema_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
         self.assertIn("status", response.data)
 
     def test_running_run_returns_409(self):
-        run = make_pipeline_run(status=RunStatus.RUNNING)
+        run = self.make_run(status=RunStatus.RUNNING)
         client = self.auth_as(self.user)
         response = client.get(self.run_schema_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
 
     def test_failed_run_returns_409(self):
-        run = make_pipeline_run(status=RunStatus.FAILED)
+        run = self.make_run(status=RunStatus.FAILED)
         client = self.auth_as(self.user)
         response = client.get(self.run_schema_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_409_CONFLICT)
@@ -575,21 +579,20 @@ class PipelineRunSchemaViewTest(BaseAPITestCase):
 
     def test_success_run_missing_result_returns_404(self):
         """Run is SUCCESS but MetadataResult row was deleted / never created."""
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
-        # Do NOT create a MetadataResult
+        run = self.make_run(status=RunStatus.SUCCESS)
         client = self.auth_as(self.user)
         response = client.get(self.run_schema_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_409_response_contains_run_id_and_status(self):
-        run = make_pipeline_run(status=RunStatus.PENDING)
+        run = self.make_run(status=RunStatus.PENDING)
         client = self.auth_as(self.user)
         response = client.get(self.run_schema_url(run.id))
         self.assertEqual(str(response.data["run_id"]), str(run.id))
         self.assertEqual(response.data["status"], RunStatus.PENDING)
 
     def test_unauthenticated_request_returns_401(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         response = self.client.get(self.run_schema_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
@@ -617,7 +620,7 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         return profiles
 
     def test_success_run_returns_all_profiles(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         self._make_profiles(run, count=3)
         client = self.auth_as(self.user)
         response = client.get(self.run_columns_url(run.id))
@@ -625,7 +628,7 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         self.assertEqual(len(response.data["results"]), 3)
 
     def test_profiles_ordered_by_column_name(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         for name in ("zzz", "aaa", "mmm"):
             ColumnProfile.objects.create(
                 run=run, column_name=name, dtype="object",
@@ -638,13 +641,13 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         self.assertEqual(names, sorted(names))
 
     def test_pending_run_returns_400(self):
-        run = make_pipeline_run(status=RunStatus.PENDING)
+        run = self.make_run(status=RunStatus.PENDING)
         client = self.auth_as(self.user)
         response = client.get(self.run_columns_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
 
     def test_filter_by_semantic_type(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         ColumnProfile.objects.create(
             run=run, column_name="email_col", dtype="object",
             semantic_type="EMAIL", semantic_confidence=0.99,
@@ -662,7 +665,7 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         self.assertEqual(response.data["results"][0]["column_name"], "email_col")
 
     def test_filter_by_semantic_type_is_case_insensitive(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         ColumnProfile.objects.create(
             run=run, column_name="email_col", dtype="object",
             semantic_type="EMAIL", semantic_confidence=0.99,
@@ -674,7 +677,7 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         self.assertEqual(len(response.data["results"]), 1)
 
     def test_filter_nullable_true(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         ColumnProfile.objects.create(
             run=run, column_name="a", dtype="object", semantic_type="STRING",
             semantic_confidence=0.9, nullable=True, unique_count=1, null_count=1, profile_data={},
@@ -690,7 +693,7 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         self.assertEqual(response.data["results"][0]["column_name"], "a")
 
     def test_filter_nullable_false(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         ColumnProfile.objects.create(
             run=run, column_name="a", dtype="object", semantic_type="STRING",
             semantic_confidence=0.9, nullable=True, unique_count=1, null_count=1, profile_data={},
@@ -710,12 +713,12 @@ class PipelineRunColumnProfilesViewTest(BaseAPITestCase):
         self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
 
     def test_unauthenticated_request_returns_401(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         response = self.client.get(self.run_columns_url(run.id))
         self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
 
     def test_profile_response_includes_run_id(self):
-        run = make_pipeline_run(status=RunStatus.SUCCESS)
+        run = self.make_run(status=RunStatus.SUCCESS)
         self._make_profiles(run, count=1)
         client = self.auth_as(self.user)
         response = client.get(self.run_columns_url(run.id))

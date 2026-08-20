@@ -1,58 +1,105 @@
-"""
-API views for the recommendations app.
+from __future__ import annotations
 
-Provides RESTful endpoints to retrieve personalised recommendations
-and submit explicit user feedback. Uses DRF GenericAPIView.
-
-Endpoints (registered in api/urls.py):
-  GET  /api/recommendations/
-    Returns Top-N recommended datasets for the authenticated user.
-    Reads from cache first; falls back to a live HybridEngine call.
-
-  POST /api/recommendations/feedback/
-    Records explicit user feedback (rating, thumbs up/down) as a
-    UserInteraction, which triggers cache invalidation via signals.
-
-Views contain no scoring or ranking logic.
-All recommendation computation is delegated to the domain layer.
-"""
-
-from rest_framework.generics import ListAPIView, CreateAPIView
+import logging
+from rest_framework import status
+from rest_framework.generics import CreateAPIView, GenericAPIView
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.response import Response
-from rest_framework import status
 
-from recommendations.infrastructure.cache import get_cached_recommendations
+from recommendations.domain.schemas import EngineConfig
 from recommendations.domain.engines.hybrid import HybridEngine
-from .serializers import RecommendationListSerializer, FeedbackSerializer
+from recommendations.infrastructure.cache import (
+    get_cached_recommendations,
+    set_cached_recommendations,
+)
+from recommendations.models import DatasetProxy
+from .serializers import (
+    FeedbackSerializer,
+    RecommendationListSerializer,
+    RecommendationRequestSerializer,
+)
+
+logger = logging.getLogger(__name__)
 
 
-class RecommendationListView(ListAPIView):
+class RecommendationListView(GenericAPIView):
     """
     GET /api/recommendations/
+    GET /api/recommendations/<dataset_id>/
 
-    Returns Top-N personalised recommended datasets for the authenticated user.
-
-    Strategy:
-      1. Check the cache for a pre-computed ranked list.
-      2. On a cache miss, delegate to HybridEngine for a live computation.
-         For large/expensive requests this should be enqueued as a Celery task;
-         the synchronous fallback here is intentionally lightweight.
+    Returns Top-N personalised or dataset-targeted recommendations for the authenticated user.
+    Supports query parameters:
+      - strategy: "hybrid" (default), "content", "collaborative"
+      - top_n: integer (default: 10)
+      - alpha: float in [0.0, 1.0] (default: 0.5)
+      - dataset_id: optional target dataset ID
     """
 
     permission_classes = [IsAuthenticated]
     serializer_class = RecommendationListSerializer
 
-    def list(self, request, *args, **kwargs):
+    def get(self, request, *args, **kwargs):
         user = request.user
+        user_id = getattr(user, "id", getattr(user, "pk", 1))
 
-        ranked_list = get_cached_recommendations(user_id=user.pk)
+        # Validate query parameters
+        param_serializer = RecommendationRequestSerializer(data=request.query_params)
+        param_serializer.is_valid(raise_exception=False)
+        top_n = param_serializer.validated_data.get("top_n", 10)
+        alpha = param_serializer.validated_data.get("alpha", 0.5)
+
+        strategy = request.query_params.get("strategy", "hybrid").lower()
+        target_dataset_id = kwargs.get("dataset_id") or request.query_params.get("dataset_id")
+
+        cfg = EngineConfig(top_n=top_n, alpha=alpha)
+
+        # Check cache for default hybrid user recommendations
+        ranked_list = None
+        if strategy == "hybrid" and not target_dataset_id:
+            try:
+                ranked_list = get_cached_recommendations(user_id=user_id)
+            except Exception:
+                ranked_list = None
 
         if ranked_list is None:
             engine = HybridEngine(user=user)
-            ranked_list = engine.get_recommendations()
+            ranked_list = engine.recommend(
+                user_id=user_id,
+                strategy=strategy,
+                config=cfg,
+            )
+            if strategy == "hybrid" and not target_dataset_id:
+                try:
+                    set_cached_recommendations(user_id, ranked_list)
+                except Exception:
+                    pass
 
-        serializer = self.get_serializer(ranked_list)
+        # Hydrate dataset metadata (titles, categories) from DatasetProxy
+        item_ids = [item.item_id for item in ranked_list.items]
+        datasets_map = {
+            ds.dataset_id: ds
+            for ds in DatasetProxy.objects.filter(dataset_id__in=item_ids)
+        }
+
+        rec_items = []
+        for idx, item in enumerate(ranked_list.items):
+            ds = datasets_map.get(item.item_id)
+            title = ds.title if ds else f"Dataset {item.item_id}"
+            rec_items.append({
+                "dataset_id": str(item.item_id),
+                "title": title,
+                "rank": idx + 1,
+                "s_hybrid": round(float(item.s_hybrid), 4),
+            })
+
+        payload = {
+            "recommendations": rec_items,
+            "alpha": float(getattr(ranked_list, "alpha", alpha)),
+            "top_n": int(top_n),
+            "generated_at": ranked_list.generated_at,
+        }
+
+        serializer = self.get_serializer(payload)
         return Response(serializer.data, status=status.HTTP_200_OK)
 
 
@@ -62,9 +109,7 @@ class FeedbackView(CreateAPIView):
 
     Records explicit user feedback (rating or thumbs up/down) as a
     UserInteraction. Saving the interaction triggers cache invalidation
-    via Django signals — no manual invalidation is needed here.
-
-    Returns 201 on success with the serialised interaction payload.
+    via Django signals.
     """
 
     permission_classes = [IsAuthenticated]

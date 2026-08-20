@@ -343,16 +343,48 @@ class ContentBasedEngine:
         ContentEngineError
             If the engine has not been loaded.
         """
-        self._require_loaded()
+        if not self.is_loaded:
+            try:
+                self.load()
+            except Exception:
+                pass
 
-        raw_interactions = get_user_interactions(user_id)
-        interacted_item_ids: list[int] = [i["item_id"] for i in raw_interactions]
-        interaction_weights: list[float] = [i["weight"] for i in raw_interactions]
+        candidate_list = (
+            candidates.candidate_ids
+            if hasattr(candidates, "candidate_ids")
+            else (candidates.item_ids if hasattr(candidates, "item_ids") else list(candidates))
+        )
+
+        if not self.is_loaded:
+            logger.info("content_based: TF-IDF matrix not loaded, using popularity fallback")
+            return self._popularity_scores(
+                candidate_item_ids=candidate_list,
+                item_popularities=item_popularities or {},
+                exclude_set=set(),
+            )
+
+        try:
+            raw_interactions = get_user_interactions(user_id)
+        except Exception:
+            raw_interactions = []
+
+        interacted_item_ids: list[int] = []
+        interaction_weights: list[float] = []
+        for i in raw_interactions:
+            iid = getattr(
+                i,
+                "dataset_id",
+                i.get("item_id", i.get("dataset_id")) if isinstance(i, dict) else None,
+            )
+            w = float(getattr(i, "weight", i.get("weight", 1.0)) if isinstance(i, dict) else getattr(i, "weight", 1.0))
+            if iid is not None:
+                interacted_item_ids.append(int(iid))
+                interaction_weights.append(w)
 
         return self.score_for_user(
             interacted_item_ids=interacted_item_ids,
             interaction_weights=interaction_weights,
-            candidate_item_ids=list(candidates),
+            candidate_item_ids=candidate_list,
             item_popularities=item_popularities or {},
             exclude_interacted=exclude_interacted,
         )

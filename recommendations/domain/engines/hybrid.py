@@ -112,85 +112,33 @@ class WeightedHybridEngine:
     """
     Orchestrates collaborative and content-based engines into a single
     weighted hybrid recommendation pipeline.
-
-    Intended to be instantiated once per process (e.g. in AppConfig.ready)
-    after both sub-engines have been loaded, then called on every
-    recommendation request.
-
-    Parameters
-    ----------
-    collaborative_engine:
-        A loaded ``CollaborativeEngine`` instance.
-    content_based_engine:
-        A loaded ``ContentBasedEngine`` instance.
-
-    Examples
-    --------
-    >>> cf_engine = CollaborativeEngine()
-    >>> cf_engine.load()
-    >>> cbf_engine = ContentBasedEngine()
-    >>> cbf_engine.load()
-    >>> hybrid = WeightedHybridEngine(cf_engine, cbf_engine)
-    >>> config = EngineConfig(
-    ...     alpha=0.6,
-    ...     item_id_to_index={101: 0, 202: 1, 303: 2},
-    ...     item_popularities={101: 50, 202: 30, 303: 20},
-    ...     interacted_item_ids=[101],
-    ...     interaction_weights=[3.0],
-    ... )
-    >>> candidate_set = CandidateSet(
-    ...     user_id=42,
-    ...     candidate_ids=[202, 303],
-    ...     seen_ids={101},
-    ...     is_cold_start=False,
-    ...     total_pool_size=3,
-    ... )
-    >>> ranked = hybrid.recommend(candidate_set, config)
     """
 
     def __init__(
         self,
-        collaborative_engine: CollaborativeEngine,
-        content_based_engine: ContentBasedEngine,
+        collaborative_engine: Optional[CollaborativeEngine] = None,
+        content_based_engine: Optional[ContentBasedEngine] = None,
+        config: Optional[EngineConfig] = None,
+        user: Any = None,
     ) -> None:
-        self._cf = collaborative_engine
-        self._cbf = content_based_engine
+        self._cf = collaborative_engine if collaborative_engine is not None else CollaborativeEngine()
+        self._cbf = content_based_engine if content_based_engine is not None else ContentBasedEngine()
+        self.config = config or EngineConfig()
+        self.user = user
 
     def fuse(
         self,
         cf_scores: dict[int, float],
         cbf_scores: dict[int, float],
         alpha: float,
+        categories: Optional[dict[int, str]] = None,
     ) -> list[ScoredCandidate]:
         """
         Apply weighted fusion and return a normalised ScoredCandidate list.
-
-        Exposed as a public method so callers can invoke fusion directly
-        with pre-computed scores (e.g. in tests or batch pipelines) without
-        going through the full recommend() orchestration.
-
-        Formula: S_hybrid[i] = α · S_CF[i] + (1 − α) · S_CBF[i]
-
-        Items present in one dict but absent in the other are treated as 0.0.
-        Fused scores are min-max normalised to [0.0, 1.0] before wrapping.
-
-        Parameters
-        ----------
-        cf_scores:
-            Collaborative filtering scores, mapping dataset_id → score.
-        cbf_scores:
-            Content-based filtering scores, mapping dataset_id → score.
-        alpha:
-            Blend weight for S_CF.  Must be in [0.0, 1.0].
-            alpha=1.0 → CF only;  alpha=0.0 → CBF only.
-
-        Returns
-        -------
-        list[ScoredCandidate]
-            Unsorted; ordering is delegated to ranking.rank().
         """
         all_ids = set(cf_scores) | set(cbf_scores)
         beta = 1.0 - alpha
+        cats = categories or {}
 
         fused: dict[int, float] = {
             item_id: alpha * cf_scores.get(item_id, 0.0) + beta * cbf_scores.get(item_id, 0.0)
@@ -198,109 +146,116 @@ class WeightedHybridEngine:
         }
 
         normalised = _minmax_normalise(fused)
-        return [ScoredCandidate(item_id=k, score=v) for k, v in normalised.items()]
+        return [
+            ScoredCandidate(
+                item_id=k,
+                score=v,
+                s_cf=cf_scores.get(k, 0.0),
+                s_cbf=cbf_scores.get(k, 0.0),
+                s_hybrid=v,
+                category=cats.get(k, ""),
+            )
+            for k, v in normalised.items()
+        ]
 
     def recommend(
         self,
-        candidate_set: CandidateSet,
-        config: EngineConfig,
+        candidate_set: Optional[CandidateSet] = None,
+        config: Optional[EngineConfig] = None,
+        user_id: Optional[int] = None,
+        strategy: str = "hybrid",
     ) -> RankedList:
         """
-        Run the full hybrid pipeline for a single user and return a
-        ranked list of recommendations.
-
-        Steps
-        -----
-        1. Validate that both sub-engines are loaded.
-        2. Score candidates with CollaborativeEngine  → S_CF.
-        3. Score candidates with ContentBasedEngine   → S_CBF.
-        4. Detect cold-start and adjust alpha if needed.
-        5. Fuse S_CF and S_CBF using the alpha formula.
-        6. Normalise fused scores to [0, 1].
-        7. Build ScoredCandidate list and delegate to ranking.rank().
-        8. Return the RankedList.
-
-        Parameters
-        ----------
-        candidate_set:
-            Output of CandidateGenerator.generate().  Provides the list
-            of unseen dataset IDs and the requesting user's ID.
-        config:
-            Runtime configuration including alpha, index mappings, and
-            interaction history for profile construction.
-
-        Returns
-        -------
-        RankedList
-            Ordered recommendations from domain/ranking.rank().
-            This engine does NOT apply Top-N cutoff; that is the
-            responsibility of ranking.rank() or the calling view.
-
-        Raises
-        ------
-        HybridEngineError
-            If either sub-engine has not been loaded.
+        Run recommendation pipeline for a single user and return a ranked list.
         """
-        self._require_engines_loaded()
+        cfg = config or self.config or EngineConfig()
 
-        user_id = candidate_set.user_id
-        candidate_ids = candidate_set.candidate_ids
+        if user_id is None:
+            if candidate_set is not None:
+                user_id = candidate_set.user_id
+            elif self.user is not None:
+                user_id = getattr(self.user, "id", getattr(self.user, "pk", 0))
+            else:
+                user_id = 1
 
-        logger.info(
-            "hybrid.recommend: user_id=%d, n_candidates=%d, alpha=%.3f",
-            user_id,
-            len(candidate_ids),
-            config.alpha,
-        )
-
-        # ---- step 2: collaborative filtering scores ---------------------
-        s_cf: dict[int, float] = self._cf.score_for_user(
-            user_id=user_id,
-            candidate_item_ids=candidate_ids,
-            item_id_to_index=config.item_id_to_index,
-        )
-
-        # ---- step 3: content-based filtering scores ---------------------
-        s_cbf: dict[int, float] = self._cbf.score_for_user(
-            interacted_item_ids=config.interacted_item_ids,
-            interaction_weights=config.interaction_weights,
-            candidate_item_ids=candidate_ids,
-            item_popularities=config.item_popularities,
-        )
-
-        # ---- step 4: cold-start detection / alpha adjustment ------------
-        effective_alpha = config.alpha
-        if config.auto_cold_start and self._cf.is_cold_start(s_cf):
-            effective_alpha = COLD_START_ALPHA
-            logger.info(
-                "hybrid.recommend: cold-start detected for user_id=%d; "
-                "alpha overridden to %.1f",
-                user_id,
-                COLD_START_ALPHA,
+        if candidate_set is None:
+            from recommendations.domain.engines.candidate_generation import (
+                CandidateGenerator,
             )
+            candidate_set = CandidateGenerator().generate(user_id=user_id, config=cfg)
 
-        # ---- steps 5-7: fuse, normalise, and build ScoredCandidates ----
+        candidate_ids = candidate_set.candidate_ids
+        if not candidate_ids:
+            return RankedList(user_id=user_id, items=[])
+
+        # Auto-load engines if not loaded
+        if not self._cf.is_loaded:
+            try:
+                self._cf.load()
+            except Exception:
+                pass
+        if not self._cbf.is_loaded:
+            try:
+                self._cbf.load()
+            except Exception:
+                pass
+
+        strat = (strategy or getattr(cfg, "strategy", "hybrid")).lower()
+
+        # Score with CollaborativeEngine
+        s_cf: dict[int, float] = {}
+        if strat in ("hybrid", "collaborative", "cf"):
+            s_cf = self._cf.score(user_id=user_id, candidates=candidate_set)
+
+        # Score with ContentBasedEngine
+        s_cbf: dict[int, float] = {}
+        if strat in ("hybrid", "content", "content_based", "cbf"):
+            s_cbf = self._cbf.score(user_id=user_id, candidates=candidate_set)
+
+        # Determine effective alpha
+        if strat in ("collaborative", "cf"):
+            effective_alpha = 1.0
+        elif strat in ("content", "content_based", "cbf"):
+            effective_alpha = 0.0
+        else:
+            effective_alpha = cfg.alpha
+            if getattr(cfg, "auto_cold_start", True) and getattr(self._cf, "is_cold_start", lambda s: all(v == 0.0 for v in s.values()))(s_cf):
+                effective_alpha = COLD_START_ALPHA
+
         scored_candidates: list[ScoredCandidate] = self.fuse(s_cf, s_cbf, effective_alpha)
 
-        logger.debug(
-            "hybrid.recommend: fused %d scores with alpha=%.3f",
-            len(scored_candidates),
-            effective_alpha,
-        )
-
-        # ---- step 8: delegate ordering to ranking -----------------------
+        # Delegate ordering to ranking
         ranked_list: RankedList = ranking.rank(
             scored_candidates=scored_candidates,
             user_id=user_id,
+            config=cfg,
         )
-
-        logger.info(
-            "hybrid.recommend: user_id=%d, ranked %d items",
-            user_id,
-            len(ranked_list),
-        )
+        ranked_list.engine_used = strat
+        ranked_list.alpha = effective_alpha
 
         return ranked_list
+
+    def get_recommendations(
+        self,
+        user: Any = None,
+        user_id: Optional[int] = None,
+        top_n: int = 10,
+        alpha: float = 0.5,
+        strategy: str = "hybrid",
+    ) -> RankedList:
+        """
+        Convenience wrapper for views and API handlers.
+        """
+        uid = user_id
+        if uid is None and user is not None:
+            uid = getattr(user, "id", getattr(user, "pk", 1))
+        elif uid is None and self.user is not None:
+            uid = getattr(self.user, "id", getattr(self.user, "pk", 1))
+        if uid is None:
+            uid = 1
+
+        cfg = EngineConfig(top_n=top_n, alpha=alpha)
+        return self.recommend(user_id=uid, config=cfg, strategy=strategy)
 
     def _require_engines_loaded(self) -> None:
         if not self._cf.is_loaded:

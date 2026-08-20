@@ -50,6 +50,7 @@ INSTALLED_APPS = [
 
     # Third-party apps
     'rest_framework',
+    'rest_framework.authtoken',
 ]
 
 MIDDLEWARE = [
@@ -96,13 +97,9 @@ DATABASES = {
 CACHES = {
     "default": {
         'BACKEND': "django.core.cache.backends.redis.RedisCache",
-        'LOCATION': "redis://127.0.0.1:6379",  #this ip address is only an example
-        'Timeout': 60 * 60,  # <1hr> this is also a placeholder not yet decided upon
-        # max entries and eviction policy can be set here if desired, but defaults are usually fine for LLM caching
-        # is there an option to set ttl per cache entry? that would be ideal for LLM caching, but if not we can just set a global timeout as above
-        'OPTIONS': {
-            
-        }, 
+        'LOCATION': os.getenv("REDIS_URL", "redis://127.0.0.1:6379"),
+        'TIMEOUT': 60 * 60,  # 1 hour
+        'OPTIONS': {},
     }
 }
 
@@ -126,6 +123,14 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 
+# Celery Configuration
+CELERY_BROKER_URL = os.getenv("CELERY_BROKER_URL", "redis://localhost:6379/0")
+CELERY_RESULT_BACKEND = os.getenv("CELERY_RESULT_BACKEND", "redis://localhost:6379/0")
+# In tests, tasks are mocked — do NOT run them eagerly unless explicitly overridden.
+CELERY_TASK_ALWAYS_EAGER = os.getenv("CELERY_TASK_ALWAYS_EAGER", "False").lower() in ("true", "1")
+CELERY_TASK_EAGER_PROPAGATES = True
+
+
 # Internationalization
 # https://docs.djangoproject.com/en/6.0/topics/i18n/
 
@@ -146,13 +151,15 @@ STATIC_URL = 'static/'
 
 REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": [
-        "rest_framework.authentication.SessionAuthentication",
+        # TokenAuthentication FIRST → unauthenticated requests return 401
+        # (includes WWW-Authenticate: Token realm header).
+        # SessionAuthentication second for browser/CSRF-based sessions.
         "rest_framework.authentication.TokenAuthentication",
+        "rest_framework.authentication.SessionAuthentication",
     ],
 
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
-    
 }
 
 

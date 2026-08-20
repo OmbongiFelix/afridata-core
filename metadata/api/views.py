@@ -24,12 +24,12 @@ from celery import Task
 
 from rest_framework import generics, mixins, status
 from rest_framework import request
-from rest_framework.exceptions import NotFound, ValidationError
+from rest_framework.exceptions import NotFound, ValidationError as DRFValidationError
 from rest_framework.pagination import PageNumberPagination
 from rest_framework.permissions import BasePermission, IsAuthenticated
 from rest_framework.request import Request
 from rest_framework.response import Response
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ValidationError as DjangoValidationError
 from django.http import Http404
 from rest_framework.serializers import BaseSerializer
 from rest_framework.views import APIView
@@ -65,7 +65,7 @@ def _get_run_or_404(pk: str) -> PipelineRun:
     """Return a PipelineRun by pk or raise DRF NotFound."""
     try:
         return PipelineRun.objects.get(pk=pk)
-    except (PipelineRun.DoesNotExist, ValueError, ValidationError):
+    except (PipelineRun.DoesNotExist, ValueError, DjangoValidationError):
         raise NotFound(detail=f"PipelineRun '{pk}' not found.")
     
 
@@ -156,18 +156,30 @@ class PipelineRunListCreateView(
         
         run_pipeline_task: Task = _run_pipeline_task  # type: ignore[assignment]
         # --- Dispatch Celery task ------------------------------------------
-        # In tests, set CELERY_TASK_ALWAYS_EAGER = True so .delay() runs
-        # synchronously without needing a running broker.
-        run_pipeline_task.delay(
-            run_id              = str(run.id),
-            source              = run.source,
-            source_path         = run.source_path,
-            dataset_title       = run.dataset_title,
-            dataset_description = run.dataset_description,
-            sql_schema          = data.get("sql_schema"),
-            sql_query           = data.get("sql_query"),
-        )
-        logger.info("Dispatched Celery task for PipelineRun %s.", run.id)
+        # In dev/test, CELERY_TASK_ALWAYS_EAGER=True runs the task inline.
+        # In production, the task is sent to the broker asynchronously.
+        # Either way, the run record is already in PENDING — the 202 response
+        # is always returned so clients can poll for completion.
+        try:
+            run_pipeline_task.delay(
+                run_id              = str(run.id),
+                source              = run.source,
+                source_path         = run.source_path,
+                dataset_title       = run.dataset_title,
+                dataset_description = run.dataset_description,
+                sql_schema          = data.get("sql_schema"),
+                sql_query           = data.get("sql_query"),
+            )
+            logger.info("Dispatched Celery task for PipelineRun %s.", run.id)
+        except Exception:
+            # Broker unavailable (dev without Redis) or eager-mode pipeline
+            # failure. The run record already exists in PENDING state; log the
+            # error and return the 202 so clients can still poll for status.
+            logger.exception(
+                "Failed to dispatch pipeline task for PipelineRun %s. "
+                "Run remains in PENDING state.",
+                run.id,
+            )
 
         return Response(
             PipelineRunSerializer(run).data,
@@ -316,7 +328,7 @@ class PipelineRunColumnProfilesView(
         self.check_object_permissions(self.request, run)
 
         if run.status != RunStatus.SUCCESS:
-            raise ValidationError(
+            raise DRFValidationError(
                 {
                     "detail": (
                         f"Column profiles are not available. "

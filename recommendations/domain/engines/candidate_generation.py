@@ -262,7 +262,16 @@ class CandidateGenerator:
                 f"Failed to fetch interactions for user_id={user_id}."
             ) from exc
 
-        seen_ids: set[int] = {interaction.dataset_id for interaction in interactions}
+        seen_ids: set[int] = set()
+        for interaction in interactions:
+            iid = getattr(
+                interaction,
+                "dataset_id",
+                interaction.get("dataset_id", interaction.get("item_id")) if isinstance(interaction, dict) else None,
+            )
+            if iid is not None:
+                seen_ids.add(int(iid))
+
         is_cold_start = len(seen_ids) == 0
 
         logger.info(

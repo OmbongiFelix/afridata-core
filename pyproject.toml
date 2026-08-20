@@ -30,4 +30,9 @@ dependencies = [
 [dependency-groups]
 dev = [
     "factory-boy>=3.3.3",
+    "pytest-django>=4.9.0",
 ]
+
+[tool.pytest.ini_options]
+DJANGO_SETTINGS_MODULE = "config.settings"
+python_files = ["test_*.py", "*_test.py", "tests.py"]

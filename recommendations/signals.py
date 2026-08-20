@@ -14,11 +14,15 @@ Signals are connected inside AppConfig.ready() in apps.py.
 Do not import this module directly anywhere else.
 """
 
+import logging
+
 from django.db.models.signals import post_save, post_delete
 from django.dispatch import receiver
 
 from recommendations.models import UserInteraction
 from recommendations import tasks
+
+logger = logging.getLogger(__name__)
 
 
 @receiver(
@@ -35,13 +39,25 @@ def on_interaction_saved(sender, instance, created, **kwargs):
     updated. Heavy work is always delegated to Celery — this handler
     must not block.
 
+    If the Celery broker is unavailable (e.g. in tests or local dev
+    without Redis), the error is logged as a warning and the save
+    completes normally — cache invalidation is best-effort.
+
     Args:
         sender:   The UserInteraction model class.
         instance: The UserInteraction instance that was saved.
         created:  True if a new record was inserted; False on update.
         **kwargs: Additional signal keyword arguments (ignored).
     """
-    tasks.refresh_user_scores.delay(instance.user_id)
+    try:
+        tasks.refresh_user_scores.delay(instance.user_id)
+    except Exception:
+        logger.warning(
+            "on_interaction_saved: could not enqueue refresh_user_scores "
+            "for user_id=%s (broker unavailable?)",
+            instance.user_id,
+            exc_info=True,
+        )
 
 
 @receiver(
@@ -58,9 +74,21 @@ def on_interaction_deleted(sender, instance, **kwargs):
     Same invalidation path as on_interaction_saved. Heavy work is always
     delegated to Celery — this handler must not block.
 
+    If the Celery broker is unavailable (e.g. in tests or local dev
+    without Redis), the error is logged as a warning and the delete
+    completes normally.
+
     Args:
         sender:   The UserInteraction model class.
         instance: The UserInteraction instance that was deleted.
         **kwargs: Additional signal keyword arguments (ignored).
     """
-    tasks.refresh_user_scores.delay(instance.user_id)
+    try:
+        tasks.refresh_user_scores.delay(instance.user_id)
+    except Exception:
+        logger.warning(
+            "on_interaction_deleted: could not enqueue refresh_user_scores "
+            "for user_id=%s (broker unavailable?)",
+            instance.user_id,
+            exc_info=True,
+        )

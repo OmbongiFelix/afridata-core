@@ -30,7 +30,11 @@ class IsPipelineAdmin(BasePermission):
         return bool(
             request.user
             and request.user.is_authenticated
-            and request.user.groups.filter(name="pipeline_admin").exists()
+            and (
+                request.user.is_staff
+                or request.user.is_superuser
+                or request.user.groups.filter(name="pipeline_admin").exists()
+            )
         )
 
 
@@ -73,7 +77,11 @@ class IsOwnerOrAdmin(BasePermission):
 
     def has_object_permission(self, request, view, obj):
         # Pipeline admins can access any object
-        if request.user.groups.filter(name="pipeline_admin").exists():
+        if (
+            request.user.is_staff
+            or request.user.is_superuser
+            or request.user.groups.filter(name="pipeline_admin").exists()
+        ):
             return True
  
         # All other authenticated users can only access their own runs

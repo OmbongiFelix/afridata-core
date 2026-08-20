@@ -114,6 +114,9 @@ class RecommendationListSerializer(serializers.Serializer):
     generated_at = serializers.DateTimeField(read_only=True)
 
 
+from recommendations.models import InteractionType, UserInteraction
+
+
 class FeedbackSerializer(serializers.ModelSerializer):
     """
     Validates the POST body for the feedback endpoint.
@@ -142,12 +145,16 @@ class FeedbackSerializer(serializers.ModelSerializer):
 
     def validate_interaction_type(self, value: str) -> str:
         """Ensure interaction_type is one of the model's allowed choices."""
-        valid_choices = {
-            choice[0] for choice in UserInteraction.INTERACTION_TYPE_CHOICES
-        }
+        valid_choices = {choice.value for choice in InteractionType}
         if value not in valid_choices:
             raise serializers.ValidationError(
                 f"Invalid interaction type '{value}'. "
                 f"Must be one of: {', '.join(sorted(valid_choices))}."
             )
         return value
+
+    def create(self, validated_data):
+        rating = validated_data.pop("rating", None)
+        if rating is not None:
+            validated_data["explicit_rating"] = float(rating)
+        return UserInteraction.objects.create(**validated_data)

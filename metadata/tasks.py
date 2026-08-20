@@ -158,7 +158,7 @@ def run_pipeline_task(
         so Celery marks the task as FAILURE in its result backend.
     """
     from metadata.models import MetadataResult, PipelineRun
-    from core.pipeline import MetadataPipeline
+    from metadata.core.pipeline import MetadataPipeline
 
     # ------------------------------------------------------------------
     # 1. Fetch the run record
@@ -269,6 +269,44 @@ def run_pipeline_task(
             "run_pipeline_task: failed to save ColumnProfiles for run %s "
             "(non-fatal — schema result was persisted successfully).",
             run_id,
+        )
+
+    # ------------------------------------------------------------------
+    # 5b. Sync DatasetProxy in recommendations app (best-effort)
+    # ------------------------------------------------------------------
+    try:
+        from recommendations.models import DatasetProxy
+        # Collect inferred tags and semantic types from profiles
+        inferred_tags = set()
+        semantic_types = set()
+        for p in result.profiles.values():
+            if p.get("semantic_type"):
+                semantic_types.add(p["semantic_type"])
+            for tag in p.get("tags", []):
+                inferred_tags.add(tag)
+
+        # Stable integer dataset_id derived from UUID or run ordering
+        ds_id = (abs(hash(str(run.id))) % 900000) + 100000
+        category = next(iter(semantic_types), "general") if semantic_types else "general"
+        tags_str = ",".join(sorted(inferred_tags | semantic_types))
+        
+        DatasetProxy.objects.update_or_create(
+            dataset_id=ds_id,
+            defaults={
+                "title": run.dataset_title or f"Dataset {ds_id}",
+                "description": run.dataset_description or f"Ingested from {run.source} ({run.source_path})",
+                "tags": tags_str,
+                "category": category,
+                "formats": run.source,
+                "is_active": True,
+            },
+        )
+        logger.debug("run_pipeline_task: synced DatasetProxy id=%d for run %s", ds_id, run_id)
+    except Exception:
+        logger.warning(
+            "run_pipeline_task: could not sync DatasetProxy for run %s (ignoring)",
+            run_id,
+            exc_info=True,
         )
 
     # ------------------------------------------------------------------

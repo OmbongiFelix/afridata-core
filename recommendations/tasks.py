@@ -56,7 +56,7 @@ def refresh_user_scores(self, user_id: int) -> None:
     try:
         engine = HybridEngine()
         recommendations = engine.recommend(user_id=user_id)
-        set_cached_recommendations(user_id=user_id, recommendations=recommendations)
+        set_cached_recommendations(user_id=user_id, ranked_list=recommendations)
     except Exception as exc:
         logger.exception(
             "refresh_user_scores failed",

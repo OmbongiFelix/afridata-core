@@ -1,3 +1,5 @@
-"""
-This module configures the URLs specific to the recommendations app.
-"""
+from django.urls import include, path
+
+urlpatterns = [
+    path('', include('recommendations.api.urls')),
+]

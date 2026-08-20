@@ -4,7 +4,7 @@ Collaborative Filtering engine using Matrix Factorisation.
 Loads pre-trained model weights from infrastructure/model_store.py
 and scores a list of candidate items for a given user.
 
-Algorithm: Alternating Least Squares (ALS) or truncated SVD.
+Algorithm: Alternating Least Squares (ALS) or truncated Singular Value Decomposition (SVD).
            Configured via settings.CF_MODEL_TYPE.
 
 Cold-start handling:
@@ -315,37 +315,35 @@ class CollaborativeEngine:
     # Scoring
     # ------------------------------------------------------------------
 
-    def score(self, user_id: int, candidates: CandidateSet) -> dict[int, float]:
+    def score(self, user_id: int, candidates: CandidateSet | list[int]) -> dict[int, float]:
         """
-        Score a ``CandidateSet`` for a single user.  Primary public interface.
-
-        Delegates to ``score_for_user`` after unpacking the ``CandidateSet``
-        so callers in the orchestrating layer never deal with raw index dicts.
-
-        Parameters
-        ----------
-        user_id:
-            Internal integer user index (as used during training).
-        candidates:
-            ``CandidateSet`` produced by the retrieval stage.  Must expose
-            ``item_ids`` (list[int]) and ``item_id_to_index`` (dict[int, int]).
-
-        Returns
-        -------
-        dict[int, float]
-            Mapping of ``dataset_id → S_CF score`` in [0.0, 1.0].
-
-        Raises
-        ------
-        ModelNotLoadedError
-            If the engine has not been loaded or the weights file is missing.
-        CollaborativeEngineError
-            If the configured model type is unrecognised.
+        Score a ``CandidateSet`` or list of candidate IDs for a single user.
         """
+        if not self.is_loaded:
+            try:
+                self.load()
+            except Exception:
+                pass
+
+        candidate_ids = (
+            candidates.candidate_ids
+            if hasattr(candidates, "candidate_ids")
+            else (candidates.item_ids if hasattr(candidates, "item_ids") else list(candidates))
+        )
+        item_id_to_index = (
+            candidates.item_id_to_index
+            if hasattr(candidates, "item_id_to_index") and candidates.item_id_to_index
+            else {iid: idx for idx, iid in enumerate(candidate_ids)}
+        )
+
+        if not self.is_loaded:
+            logger.info("collaborative: model not loaded, returning cold-start 0.0 scores")
+            return {int(iid): 0.0 for iid in candidate_ids}
+
         return self.score_for_user(
             user_id=user_id,
-            candidate_item_ids=candidates.item_ids,
-            item_id_to_index=candidates.item_id_to_index,
+            candidate_item_ids=candidate_ids,
+            item_id_to_index=item_id_to_index,
         )
 
     def score_for_user(

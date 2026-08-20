@@ -11,8 +11,7 @@ from each stage module and chains them in order:
     5. LLM Generator → enrich metadata using an LLM prompt
     6. SchemaBuilder → serialise final output to JSON Schema
 
-Do NOT add business logic here. If a stage needs complex logic,
-it belongs in that stage's own module.
+
 
 Usage:
     # CSV source
